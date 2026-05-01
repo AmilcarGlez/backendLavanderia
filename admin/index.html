@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin BD</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <header class="topbar">
+        <div class="brand">Admin BD</div>
+        <div class="topbar-right">
+          <div id="sessionInfo" class="session"></div>
+          <button id="logoutBtn" class="btn btn-secondary hidden" type="button">Salir</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <section id="loginView" class="card">
+          <h1 class="title">Acceso</h1>
+          <form id="loginForm" class="form">
+            <label class="field">
+              <span>Usuario</span>
+              <input id="username" name="username" autocomplete="username" required />
+            </label>
+            <label class="field">
+              <span>Contraseña</span>
+              <input id="password" name="password" type="password" autocomplete="current-password" required />
+            </label>
+            <div class="actions">
+              <button class="btn btn-primary" type="submit">Ingresar</button>
+            </div>
+            <div id="loginError" class="error hidden"></div>
+          </form>
+        </section>
+
+        <section id="adminView" class="admin hidden">
+          <aside class="sidebar">
+            <div class="sidebar-header">
+              <div class="sidebar-title">Tablas</div>
+              <button id="refreshTablesBtn" class="btn btn-secondary btn-sm" type="button">Actualizar</button>
+            </div>
+            <div id="tablesList" class="tables"></div>
+            <div class="sidebar-divider"></div>
+            <div id="adminTools" class="tools hidden">
+              <div class="sidebar-title">Herramientas</div>
+              <button id="openAuditBtn" class="btn btn-secondary btn-sm" type="button">Auditoría</button>
+              <button id="openBackupsBtn" class="btn btn-secondary btn-sm" type="button">Respaldos</button>
+              <button id="openUsersBtn" class="btn btn-secondary btn-sm" type="button">Usuarios</button>
+            </div>
+          </aside>
+
+          <section class="content">
+            <div class="toolbar">
+              <div class="toolbar-left">
+                <div class="current">
+                  <div class="label">Tabla</div>
+                  <div id="currentTable" class="value">—</div>
+                </div>
+                <div class="search">
+                  <input id="searchInput" placeholder="Buscar (texto)" />
+                  <button id="searchBtn" class="btn btn-secondary btn-sm" type="button">Buscar</button>
+                </div>
+              </div>
+              <div class="toolbar-right">
+                <button id="addRowBtn" class="btn btn-primary btn-sm" type="button">Nuevo</button>
+                <button id="exportCsvBtn" class="btn btn-secondary btn-sm" type="button">CSV</button>
+                <button id="exportXlsxBtn" class="btn btn-secondary btn-sm" type="button">Excel</button>
+                <button id="exportPdfBtn" class="btn btn-secondary btn-sm" type="button">PDF</button>
+              </div>
+            </div>
+
+            <div class="filters card">
+              <div class="filters-row">
+                <select id="filterColumn"></select>
+                <select id="filterOp">
+                  <option value="eq">=</option>
+                  <option value="neq">&ne;</option>
+                  <option value="contains">contiene</option>
+                  <option value="startsWith">inicia con</option>
+                  <option value="endsWith">termina con</option>
+                  <option value="gt">&gt;</option>
+                  <option value="gte">&ge;</option>
+                  <option value="lt">&lt;</option>
+                  <option value="lte">&le;</option>
+                  <option value="isNull">es NULL</option>
+                  <option value="isNotNull">no es NULL</option>
+                </select>
+                <input id="filterValue" placeholder="Valor" />
+                <button id="addFilterBtn" class="btn btn-secondary btn-sm" type="button">Agregar filtro</button>
+                <button id="clearFiltersBtn" class="btn btn-secondary btn-sm" type="button">Limpiar</button>
+              </div>
+              <div id="filtersList" class="filters-list"></div>
+            </div>
+
+            <div class="table-wrap card">
+              <div id="tableMeta" class="meta"></div>
+              <div class="scroll">
+                <table class="grid">
+                  <thead id="gridHead"></thead>
+                  <tbody id="gridBody"></tbody>
+                </table>
+              </div>
+              <div class="pager">
+                <button id="prevPageBtn" class="btn btn-secondary btn-sm" type="button">Anterior</button>
+                <div id="pageInfo" class="page-info"></div>
+                <button id="nextPageBtn" class="btn btn-secondary btn-sm" type="button">Siguiente</button>
+                <select id="pageSizeSelect" class="select-sm">
+                  <option value="10">10</option>
+                  <option value="25" selected>25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </div>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="rowDialog" class="dialog">
+      <form id="rowForm" method="dialog" class="dialog-form">
+        <div class="dialog-header">
+          <div id="rowDialogTitle" class="dialog-title">Registro</div>
+          <button class="btn btn-secondary btn-sm" value="cancel" type="submit">Cerrar</button>
+        </div>
+        <div id="rowFields" class="dialog-body"></div>
+        <div class="dialog-actions">
+          <button id="saveRowBtn" class="btn btn-primary" value="default" type="submit">Guardar</button>
+        </div>
+        <div id="rowError" class="error hidden"></div>
+      </form>
+    </dialog>
+
+    <dialog id="genericDialog" class="dialog">
+      <form id="genericForm" method="dialog" class="dialog-form">
+        <div class="dialog-header">
+          <div id="genericTitle" class="dialog-title">Detalle</div>
+          <button class="btn btn-secondary btn-sm" value="cancel" type="submit">Cerrar</button>
+        </div>
+        <pre id="genericContent" class="pre"></pre>
+      </form>
+    </dialog>
+
+    <dialog id="usersDialog" class="dialog">
+      <form method="dialog" class="dialog-form">
+        <div class="dialog-header">
+          <div class="dialog-title">Usuarios</div>
+          <button class="btn btn-secondary btn-sm" value="cancel" type="submit">Cerrar</button>
+        </div>
+        <div class="users-grid">
+          <div class="card">
+            <div class="sidebar-title">Crear usuario</div>
+            <div class="form">
+              <label class="field">
+                <span>Usuario</span>
+                <input id="newUserUsername" />
+              </label>
+              <label class="field">
+                <span>Contraseña</span>
+                <input id="newUserPassword" type="password" />
+              </label>
+              <label class="field">
+                <span>Rol</span>
+                <select id="newUserRole">
+                  <option value="viewer">viewer</option>
+                  <option value="editor">editor</option>
+                  <option value="admin">admin</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Activo</span>
+                <select id="newUserActive">
+                  <option value="1" selected>sí</option>
+                  <option value="0">no</option>
+                </select>
+              </label>
+              <div class="actions">
+                <button id="createUserBtn" class="btn btn-primary" type="button">Crear</button>
+              </div>
+              <div id="usersError" class="error hidden"></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="sidebar-title">Listado</div>
+            <div class="scroll">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Usuario</th>
+                    <th>Rol</th>
+                    <th>Activo</th>
+                    <th>Bloqueo</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody id="usersBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="auditDialog" class="dialog">
+      <form method="dialog" class="dialog-form">
+        <div class="dialog-header">
+          <div class="dialog-title">Auditoría</div>
+          <button class="btn btn-secondary btn-sm" value="cancel" type="submit">Cerrar</button>
+        </div>
+        <div class="scroll">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Acción</th>
+                <th>Actor</th>
+                <th>Tabla</th>
+                <th>PK</th>
+                <th>Detalle</th>
+              </tr>
+            </thead>
+            <tbody id="auditBody"></tbody>
+          </table>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="backupsDialog" class="dialog">
+      <form method="dialog" class="dialog-form">
+        <div class="dialog-header">
+          <div class="dialog-title">Respaldos</div>
+          <button class="btn btn-secondary btn-sm" value="cancel" type="submit">Cerrar</button>
+        </div>
+        <div class="scroll">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Motivo</th>
+                <th>Actor</th>
+                <th>Ruta</th>
+              </tr>
+            </thead>
+            <tbody id="backupsBody"></tbody>
+          </table>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
