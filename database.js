@@ -129,6 +129,29 @@ function initDb() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
+    
+    db.run(`CREATE TABLE IF NOT EXISTS sucursales (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre TEXT NOT NULL,
+      direccion TEXT,
+      telefono TEXT,
+      activa BOOLEAN DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS users_app (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      email TEXT,
+      role TEXT NOT NULL DEFAULT 'user',
+      sucursal_id INTEGER NOT NULL,
+      is_active BOOLEAN DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(sucursal_id) REFERENCES sucursales(id)
+    )`);
+
     db.run(`CREATE TABLE IF NOT EXISTS admin_users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL UNIQUE,
@@ -193,6 +216,15 @@ function initDb() {
         });
       });
     };
+
+    
+    ensureColumn('orders', 'sucursal_id', 'INTEGER');
+    ensureColumn('ironing_jobs', 'sucursal_id', 'INTEGER');
+    ensureColumn('ironing_personnel', 'sucursal_id', 'INTEGER');
+    ensureColumn('services', 'sucursal_id', 'INTEGER');
+    ensureColumn('daily_ironing_limits', 'sucursal_id', 'INTEGER');
+    ensureColumn('app_settings', 'sucursal_id', 'INTEGER');
+
 
     ensureColumn('orders', 'fecha_entrega', 'TEXT');
     ensureColumn('orders', 'fecha_entrega_tz', "TEXT DEFAULT 'America/Mexico_City'");
