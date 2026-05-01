@@ -2,33 +2,10 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 
-const dataDir = process.env.SQLITE_DATA_DIR
-  ? path.resolve(process.env.SQLITE_DATA_DIR)
-  : path.resolve(__dirname, '.data');
+const dataDir = process.env.SQLITE_DATA_DIR || path.join(__dirname, '.data');
+const dbPath = process.env.SQLITE_DB_PATH || path.join('.data', 'lavanderia.db');
 
-const dbPath = process.env.SQLITE_DB_PATH
-  ? path.resolve(process.env.SQLITE_DB_PATH)
-  : path.resolve(dataDir, 'lavanderia.db');
 
-try {
-  fs.mkdirSync(dataDir, { recursive: true });
-} catch (err) {
-  console.error('Error creating SQLite data directory:', err?.message ?? String(err));
-}
-
-try {
-  if (fs.existsSync(dbPath)) {
-    fs.accessSync(dbPath, fs.constants.W_OK);
-  }
-} catch (err) {
-  try {
-    fs.chmodSync(dbPath, 0o666);
-    fs.chmodSync(dataDir, 0o777);
-  } catch (chmodErr) {
-    console.error('SQLite database is not writable:', dbPath);
-    console.error('Error:', chmodErr?.message ?? String(chmodErr));
-  }
-}
 
 const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
   if (err) {
@@ -218,7 +195,12 @@ function initDb() {
     };
 
     
+    
+    ensureColumn('sucursales', 'email', 'TEXT');
+    ensureColumn('sucursales', 'horario_atencion', 'TEXT');
+    ensureColumn('sucursales', 'encargado_nombre', 'TEXT');
     ensureColumn('orders', 'sucursal_id', 'INTEGER');
+
     ensureColumn('ironing_jobs', 'sucursal_id', 'INTEGER');
     ensureColumn('ironing_personnel', 'sucursal_id', 'INTEGER');
     ensureColumn('services', 'sucursal_id', 'INTEGER');

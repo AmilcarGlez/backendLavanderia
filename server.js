@@ -57,6 +57,81 @@ const authMiddleware = (req, res, next) => {
 app.use(authMiddleware);
 
 
+
+
+const requireAdmin = (req, res, next) => {
+  if (!req.user || req.user.username !== 'admin1') {
+    return res.status(403).json({ error: 'Acceso denegado: Se requiere ser el usuario administrador principal (admin1)' });
+  }
+  next();
+};
+
+app.post('/sucursales', requireAdmin, (req, res) => {
+  const { nombre, direccion, telefono, email, horario_atencion, encargado_nombre, username, password } = req.body;
+  if (!nombre || !direccion || !telefono || !email || !horario_atencion || !encargado_nombre || !username || !password) {
+    return res.status(400).json({ error: 'Faltan campos obligatorios para registrar la sucursal y usuario' });
+  }
+
+  db.serialize(() => {
+    db.run('BEGIN TRANSACTION');
+
+    // 1. Verificar si el usuario ya existe
+    db.get('SELECT id FROM users_app WHERE username = ?', [username], (err, existingUser) => {
+      if (err) {
+        db.run('ROLLBACK');
+        return res.status(500).json({ error: err.message });
+      }
+      if (existingUser) {
+        db.run('ROLLBACK');
+        return res.status(400).json({ error: 'El nombre de usuario ya está en uso' });
+      }
+
+      // 2. Insertar Sucursal
+      db.run(
+        `INSERT INTO sucursales (nombre, direccion, telefono, email, horario_atencion, encargado_nombre) VALUES (?, ?, ?, ?, ?, ?)`,
+        [nombre, direccion, telefono, email, horario_atencion, encargado_nombre],
+        function (err) {
+          if (err) {
+            db.run('ROLLBACK');
+            return res.status(500).json({ error: err.message });
+          }
+
+          const sucursalId = this.lastID;
+          const passwordHash = bcrypt.hashSync(password, 10);
+
+          // 3. Insertar Usuario
+          db.run(
+            `INSERT INTO users_app (username, password_hash, email, role, sucursal_id) VALUES (?, ?, ?, 'user', ?)`,
+            [username, passwordHash, email, sucursalId],
+            function (err) {
+              if (err) {
+                db.run('ROLLBACK');
+                return res.status(500).json({ error: err.message });
+              }
+
+              db.run('COMMIT', (commitErr) => {
+                if (commitErr) {
+                  db.run('ROLLBACK');
+                  return res.status(500).json({ error: commitErr.message });
+                }
+                res.status(201).json({ message: 'Sucursal y usuario creados exitosamente', sucursalId, userId: this.lastID });
+              });
+            }
+          );
+        }
+      );
+    });
+  });
+});
+
+app.get('/sucursales', requireAdmin, (req, res) => {
+  db.all('SELECT * FROM sucursales ORDER BY id DESC', [], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+
 app.use('/admin/api', createAdminRouter(db));
 
 app.use('/admin', (req, res, next) => {
