@@ -199,7 +199,18 @@ function initDb() {
     ensureColumn('sucursales', 'email', 'TEXT');
     ensureColumn('sucursales', 'horario_atencion', 'TEXT');
     ensureColumn('sucursales', 'encargado_nombre', 'TEXT');
+    
+    ensureColumn('sucursales', 'empresa_nombre', 'TEXT');
+    ensureColumn('sucursales', 'email', 'TEXT');
+    ensureColumn('sucursales', 'horario_atencion', 'TEXT');
+    ensureColumn('sucursales', 'encargado_nombre', 'TEXT');
+    ensureColumn('sucursales', 'rfc', 'TEXT');
+    ensureColumn('sucursales', 'logo_base64', 'TEXT');
+    ensureColumn('sucursales', 'qr_payload', 'TEXT');
+    ensureColumn('sucursales', 'ticket_legal_text', 'TEXT');
+    ensureColumn('sucursales', 'updated_at', 'DATETIME');
     ensureColumn('orders', 'sucursal_id', 'INTEGER');
+
 
     ensureColumn('ironing_jobs', 'sucursal_id', 'INTEGER');
     ensureColumn('ironing_personnel', 'sucursal_id', 'INTEGER');

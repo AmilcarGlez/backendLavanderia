@@ -131,6 +131,146 @@ app.get('/sucursales', requireAdmin, (req, res) => {
   });
 });
 
+app.get('/sucursal/me', (req, res) => {
+  const sid = req.user?.sucursal_id;
+  if (!sid) return res.status(400).json({ error: 'Missing sucursal_id' });
+  db.get('SELECT * FROM sucursales WHERE id = ?', [sid], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!row) return res.status(404).json({ error: 'Sucursal no encontrada' });
+    res.json(row);
+  });
+});
+
+const sanitizeText = (value, maxLen) => {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  const limit = Number.isFinite(maxLen) ? Math.max(1, maxLen) : 2000;
+  return v.length > limit ? v.slice(0, limit) : v;
+};
+
+const sanitizeLogoBase64 = (value) => {
+  const v = sanitizeText(value, 8_000_000);
+  if (!v) return null;
+  const isDataUrl = /^data:image\/(png|jpe?g|webp);base64,/.test(v);
+  const isRawBase64 = /^[A-Za-z0-9+/=\s]+$/.test(v);
+  if (!isDataUrl && !isRawBase64) return null;
+  return v.replace(/\s+/g, '');
+};
+
+app.put('/sucursal/me', (req, res) => {
+  const sid = req.user?.sucursal_id;
+  if (!sid) return res.status(400).json({ error: 'Missing sucursal_id' });
+
+  const body = req.body || {};
+  const empresa_nombre = sanitizeText(body.empresa_nombre, 200);
+  const nombre = sanitizeText(body.nombre, 200);
+  const direccion = sanitizeText(body.direccion, 500);
+  const telefono = sanitizeText(body.telefono, 60);
+  const email = sanitizeText(body.email, 200);
+  const horario_atencion = sanitizeText(body.horario_atencion, 200);
+  const encargado_nombre = sanitizeText(body.encargado_nombre, 200);
+  const rfc = sanitizeText(body.rfc, 20);
+  const logo_base64 = sanitizeLogoBase64(body.logo_base64);
+  const qr_payload = sanitizeText(body.qr_payload, 2000);
+  const ticket_legal_text = sanitizeText(body.ticket_legal_text, 500);
+
+  if (rfc && !/^[A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3}$/i.test(rfc.replace(/\s+/g, ''))) {
+    return res.status(400).json({ error: 'RFC inválido' });
+  }
+
+  if (body.logo_base64 !== undefined && body.logo_base64 !== null && !logo_base64) {
+    return res.status(400).json({ error: 'Logo inválido (base64)' });
+  }
+
+  db.run(
+    `UPDATE sucursales SET
+      empresa_nombre = COALESCE(?, empresa_nombre),
+      nombre = COALESCE(?, nombre),
+      direccion = COALESCE(?, direccion),
+      telefono = COALESCE(?, telefono),
+      email = COALESCE(?, email),
+      horario_atencion = COALESCE(?, horario_atencion),
+      encargado_nombre = COALESCE(?, encargado_nombre),
+      rfc = COALESCE(?, rfc),
+      logo_base64 = COALESCE(?, logo_base64),
+      qr_payload = COALESCE(?, qr_payload),
+      ticket_legal_text = COALESCE(?, ticket_legal_text),
+      updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [
+      empresa_nombre,
+      nombre,
+      direccion,
+      telefono,
+      email,
+      horario_atencion,
+      encargado_nombre,
+      rfc ? rfc.replace(/\s+/g, '').toUpperCase() : null,
+      logo_base64,
+      qr_payload,
+      ticket_legal_text,
+      sid
+    ],
+    function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true, changes: this.changes });
+    }
+  );
+});
+
+app.put('/sucursales/:id', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const {
+    empresa_nombre,
+    nombre,
+    direccion,
+    telefono,
+    email,
+    horario_atencion,
+    encargado_nombre,
+    rfc,
+    logo_base64,
+    qr_payload,
+    ticket_legal_text
+  } = req.body || {};
+
+  db.run(
+    `UPDATE sucursales SET
+      empresa_nombre = COALESCE(?, empresa_nombre),
+      nombre = COALESCE(?, nombre),
+      direccion = COALESCE(?, direccion),
+      telefono = COALESCE(?, telefono),
+      email = COALESCE(?, email),
+      horario_atencion = COALESCE(?, horario_atencion),
+      encargado_nombre = COALESCE(?, encargado_nombre),
+      rfc = COALESCE(?, rfc),
+      logo_base64 = COALESCE(?, logo_base64),
+      qr_payload = COALESCE(?, qr_payload),
+      ticket_legal_text = COALESCE(?, ticket_legal_text),
+      updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [
+      empresa_nombre ?? null,
+      nombre ?? null,
+      direccion ?? null,
+      telefono ?? null,
+      email ?? null,
+      horario_atencion ?? null,
+      encargado_nombre ?? null,
+      rfc ?? null,
+      logo_base64 ?? null,
+      qr_payload ?? null,
+      ticket_legal_text ?? null,
+      id
+    ],
+    function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true, changes: this.changes });
+    }
+  );
+});
+
 
 app.use('/admin/api', createAdminRouter(db));
 
