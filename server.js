@@ -376,7 +376,7 @@ app.post('/orders', (req, res) => {
 
 // Get all orders
 app.get('/orders', (req, res) => {
-  db.all('SELECT * FROM orders WHERE sucursal_id = ? ORDER BY id DESC', [], (err, rows) => {
+  db.all('SELECT * FROM orders WHERE sucursal_id = ? ORDER BY id DESC', [req.user?.sucursal_id], (err, rows) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
@@ -678,7 +678,7 @@ app.post('/daily-limits/add-pieces', (req, res) => {
 // --- IRONING PERSONNEL ENDPOINTS ---
 
 app.get('/ironing-personnel', (req, res) => {
-  db.all('SELECT * FROM ironing_personnel WHERE sucursal_id = ?', [], (err, rows) => {
+  db.all('SELECT * FROM ironing_personnel WHERE sucursal_id = ?', [req.user?.sucursal_id], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows.map(r => ({ ...r, id: r.id.toString(), activo: !!r.activo })));
   });
