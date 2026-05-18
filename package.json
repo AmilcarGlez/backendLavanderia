@@ -2,9 +2,9 @@
   "name": "lavanderia-backend",
   "version": "1.0.0",
   "description": "Backend for LavanderiaApp",
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node index.js",
     "test": "JEST_DISABLE_WATCHMAN=1 jest"
   },
   "dependencies": {
