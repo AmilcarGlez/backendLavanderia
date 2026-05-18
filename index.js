@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -29,7 +30,7 @@ app.get('/health', (req, res) => {
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Faltan credenciales' });
-  db.get('SELECT * FROM users_app WHERE username = ? AND is_active = 1', [username], (err, user) => {
+  db.get('SELECT * FROM users_app WHERE username = ? AND is_active = ?', [username, true], (err, user) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!user) return res.status(401).json({ error: 'Credenciales inválidas' });
     if (!bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Credenciales inválidas' });
@@ -407,7 +408,7 @@ app.post('/orders', (req, res) => {
 
     db.run(
       `INSERT INTO orders (cliente, telefono, express, metodo_pago, total, fecha_entrega, fecha_entrega_tz, sucursal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [cliente, telefono || '', express ? 1 : 0, metodo_pago, total, fechaEntregaIso, tz, req.user?.sucursal_id],
+      [cliente, telefono || '', !!express, metodo_pago, total, fechaEntregaIso, tz, req.user?.sucursal_id],
       function (err) {
         if (err) {
           db.run('ROLLBACK');
@@ -559,7 +560,7 @@ app.put('/orders/:id', (req, res) => {
      WHERE id = ? AND (sucursal_id = ? OR sucursal_id IS NULL)`,
     [
       estado,
-      entregado !== undefined ? (entregado ? 1 : 0) : null,
+      entregado !== undefined ? !!entregado : null,
       metodo_pago,
       hasFechaEntrega ? String(fecha_entrega).trim() : null,
       typeof fecha_entrega_tz === 'string' && fecha_entrega_tz.trim() ? fecha_entrega_tz.trim() : null,
@@ -599,7 +600,7 @@ app.get('/settings/:key', (req, res) => {
     res.status(400).json({ error: 'Missing key' });
     return;
   }
-  db.get('SELECT value FROM app_settings WHERE key = ?', [String(key).trim()], (err, row) => {
+  db.get('SELECT value FROM app_settings WHERE key = ? AND sucursal_id = ?', [String(key).trim(), req.user?.sucursal_id], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json({ key: String(key).trim(), value: row?.value ?? null });
   });
@@ -621,7 +622,7 @@ app.put('/settings/:key', (req, res) => {
   const normalizedValue = value === null ? '' : String(value);
 
   if (!normalizedValue.trim()) {
-    db.run('DELETE FROM app_settings WHERE key = ?', [normalizedKey], function(err) {
+    db.run('DELETE FROM app_settings WHERE key = ? AND sucursal_id = ?', [normalizedKey, req.user?.sucursal_id], function(err) {
       if (err) return res.status(500).json({ error: err.message });
       res.json({ success: true, deleted: true });
     });
@@ -629,9 +630,9 @@ app.put('/settings/:key', (req, res) => {
   }
 
   db.run(
-    `INSERT INTO app_settings (key, value) VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    [normalizedKey, normalizedValue],
+    `INSERT INTO app_settings (key, sucursal_id, value) VALUES (?, ?, ?)
+     ON CONFLICT(key, sucursal_id) DO UPDATE SET value = excluded.value`,
+    [normalizedKey, req.user?.sucursal_id, normalizedValue],
     function(err) {
       if (err) return res.status(500).json({ error: err.message });
       res.json({ success: true, key: normalizedKey, value: normalizedValue });
@@ -644,7 +645,7 @@ app.put('/settings/:key', (req, res) => {
 app.get('/daily-limits', (req, res) => {
   const { date } = req.query;
   let query = 'SELECT * FROM daily_ironing_limits WHERE sucursal_id = ? ORDER BY date_string DESC';
-  let params = [];
+  let params = [req.user?.sucursal_id];
   if (date) {
     query = 'SELECT * FROM daily_ironing_limits WHERE date_string = ? AND sucursal_id = ?';
     params = [date, req.user?.sucursal_id];
@@ -664,14 +665,14 @@ app.post('/daily-limits', (req, res) => {
   const query = 'INSERT INTO daily_ironing_limits (date_string, max_pieces, accumulated_pieces, sucursal_id) VALUES (?, ?, 0, ?)';
   db.run(query, [date_string, max_pieces, req.user?.sucursal_id], function (err) {
     if (err) {
-      if (err.message.includes('UNIQUE constraint failed')) {
+      if (String(err.code || '') === '23505' || err.message.includes('UNIQUE constraint failed')) {
          return res.status(400).json({ error: 'Limit already exists for this date' });
       }
       return res.status(500).json({ error: err.message });
     }
     
-    db.run('INSERT INTO daily_ironing_audit (date_string, action, details) VALUES (?, ?, ?)',
-      [date_string, 'CREATE_LIMIT', `Created limit: ${max_pieces}`]);
+    db.run('INSERT INTO daily_ironing_audit (date_string, action, details, sucursal_id) VALUES (?, ?, ?, ?)',
+      [date_string, 'CREATE_LIMIT', `Created limit: ${max_pieces}`, req.user?.sucursal_id]);
       
     res.status(201).json({
       id: this.lastID,
@@ -694,13 +695,13 @@ app.put('/daily-limits/:id', (req, res) => {
     if (!row) return res.status(404).json({ error: 'Limit not found' });
 
     db.run(
-      'UPDATE daily_ironing_limits SET max_pieces = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      'UPDATE daily_ironing_limits SET max_pieces = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND sucursal_id = ?',
       [max_pieces, id, req.user?.sucursal_id],
       function (updateErr) {
         if (updateErr) return res.status(500).json({ error: updateErr.message });
         
-        db.run('INSERT INTO daily_ironing_audit (date_string, action, details) VALUES (?, ?, ?)',
-          [row.date_string, 'UPDATE_LIMIT', `Updated limit from ${row.max_pieces} to ${max_pieces}`]);
+        db.run('INSERT INTO daily_ironing_audit (date_string, action, details, sucursal_id) VALUES (?, ?, ?, ?)',
+          [row.date_string, 'UPDATE_LIMIT', `Updated limit from ${row.max_pieces} to ${max_pieces}`, req.user?.sucursal_id]);
           
         res.json({ success: true, changes: this.changes });
       }
@@ -718,8 +719,8 @@ app.delete('/daily-limits/:id', (req, res) => {
     db.run('DELETE FROM daily_ironing_limits WHERE id = ? AND sucursal_id = ?', [id, req.user?.sucursal_id], function (deleteErr) {
       if (deleteErr) return res.status(500).json({ error: deleteErr.message });
       
-      db.run('INSERT INTO daily_ironing_audit (date_string, action, details) VALUES (?, ?, ?)',
-        [row.date_string, 'DELETE_LIMIT', `Deleted limit: ${row.max_pieces}`]);
+      db.run('INSERT INTO daily_ironing_audit (date_string, action, details, sucursal_id) VALUES (?, ?, ?, ?)',
+        [row.date_string, 'DELETE_LIMIT', `Deleted limit: ${row.max_pieces}`, req.user?.sucursal_id]);
         
       res.json({ success: true, changes: this.changes });
     });
@@ -736,7 +737,7 @@ app.post('/daily-limits/add-pieces', (req, res) => {
   db.serialize(() => {
     db.run('BEGIN TRANSACTION');
     
-    db.get('SELECT * FROM daily_ironing_limits WHERE date_string = ? AND sucursal_id = ?', [date_string], (err, row) => {
+    db.get('SELECT * FROM daily_ironing_limits WHERE date_string = ? AND sucursal_id = ?', [date_string, req.user?.sucursal_id], (err, row) => {
       if (err) {
         db.run('ROLLBACK');
         return res.status(500).json({ error: err.message });
@@ -765,7 +766,7 @@ app.post('/daily-limits/add-pieces', (req, res) => {
                 db.run('ROLLBACK');
                 return res.status(500).json({ error: insertErr.message });
               }
-              db.run('INSERT INTO daily_ironing_audit (date_string, action, details) VALUES (?, ?, ?)', [date_string, 'CREATE_LIMIT_AND_ADD', `Created limit: ${globalLimit} and added ${pieces} pieces.`]);
+              db.run('INSERT INTO daily_ironing_audit (date_string, action, details, sucursal_id) VALUES (?, ?, ?, ?)', [date_string, 'CREATE_LIMIT_AND_ADD', `Created limit: ${globalLimit} and added ${pieces} pieces.`, req.user?.sucursal_id]);
               db.run('COMMIT', (commitErr) => {
                 if (commitErr) {
                   db.run('ROLLBACK');
@@ -799,8 +800,8 @@ app.post('/daily-limits/add-pieces', (req, res) => {
             return res.status(500).json({ error: updateErr.message });
           }
 
-          db.run('INSERT INTO daily_ironing_audit (date_string, action, details) VALUES (?, ?, ?)',
-            [date_string, 'ADD_PIECES', `Added ${pieces} pieces. Total: ${newAccumulated}`]);
+          db.run('INSERT INTO daily_ironing_audit (date_string, action, details, sucursal_id) VALUES (?, ?, ?, ?)',
+            [date_string, 'ADD_PIECES', `Added ${pieces} pieces. Total: ${newAccumulated}`, req.user?.sucursal_id]);
             
           db.run('COMMIT', (commitErr) => {
             if (commitErr) {
@@ -831,7 +832,7 @@ app.post('/ironing-personnel', (req, res) => {
   }
 
   const query = 'INSERT INTO ironing_personnel (nombre, apellido, documento, tarifa, activo, sucursal_id) VALUES (?, ?, ?, ?, ?, ?)';
-  db.run(query, [nombre, apellido, documento, tarifa, activo !== undefined ? (activo ? 1 : 0) : 1, req.user?.sucursal_id], function (err) {
+  db.run(query, [nombre, apellido, documento, tarifa, activo !== undefined ? !!activo : true, req.user?.sucursal_id], function (err) {
     if (err) return res.status(500).json({ error: err.message });
     res.status(201).json({ id: this.lastID.toString(), nombre, apellido, documento, tarifa, activo: activo !== undefined ? activo : true });
   });
@@ -849,7 +850,7 @@ app.put('/ironing-personnel/:id', (req, res) => {
       tarifa = COALESCE(?, tarifa),
       activo = COALESCE(?, activo)
      WHERE id = ? AND (sucursal_id = ? OR sucursal_id IS NULL)`,
-    [nombre, apellido, documento, tarifa, activo !== undefined ? (activo ? 1 : 0) : null, id, req.user?.sucursal_id],
+    [nombre, apellido, documento, tarifa, activo !== undefined ? !!activo : null, id, req.user?.sucursal_id],
     function(err) {
       if (err) return res.status(500).json({ error: err.message });
       res.json({ success: true, changes: this.changes });

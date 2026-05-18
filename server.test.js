@@ -1,24 +1,60 @@
 const request = require('supertest');
-const app = require('./server');
+const bcrypt = require('bcryptjs');
+const app = require('./index');
 const db = require('./database');
 
 describe('Ironing API Endpoints', () => {
   let personnelId;
   let jobId;
   let planchadoServiceId;
+  let token;
+  let sucursalId;
 
-  beforeAll((done) => {
-    // Wait for initDb to complete, then clear tables
-    setTimeout(() => {
+  beforeAll(async () => {
+    await new Promise(r => setTimeout(r, 600));
+
+    await new Promise((resolve, reject) => {
       db.serialize(() => {
-        db.run('DELETE FROM order_items');
-        db.run('DELETE FROM ironing_jobs');
-        db.run('DELETE FROM orders');
-        db.run('DELETE FROM ironing_personnel');
-        db.run('DELETE FROM daily_ironing_limits');
-        db.run('DELETE FROM daily_ironing_audit', done);
+        db.run('DELETE FROM order_items', (e) => (e ? reject(e) : resolve()));
       });
-    }, 500);
+    });
+    await new Promise((resolve, reject) => db.run('DELETE FROM ironing_jobs', (e) => (e ? reject(e) : resolve())));
+    await new Promise((resolve, reject) => db.run('DELETE FROM orders', (e) => (e ? reject(e) : resolve())));
+    await new Promise((resolve, reject) => db.run('DELETE FROM ironing_personnel', (e) => (e ? reject(e) : resolve())));
+    await new Promise((resolve, reject) => db.run('DELETE FROM daily_ironing_limits', (e) => (e ? reject(e) : resolve())));
+    await new Promise((resolve, reject) => db.run('DELETE FROM daily_ironing_audit', (e) => (e ? reject(e) : resolve())));
+    await new Promise((resolve, reject) => db.run('DELETE FROM users_app', (e) => (e ? reject(e) : resolve())));
+    await new Promise((resolve, reject) => db.run('DELETE FROM sucursales', (e) => (e ? reject(e) : resolve())));
+
+    const createdSucursal = await new Promise((resolve, reject) => {
+      db.run(
+        'INSERT INTO sucursales (nombre, direccion, telefono, email, horario_atencion, encargado_nombre, activa) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ['Sucursal Test', 'Dir', '000', 'test@example.com', '9-6', 'Encargado', true],
+        function (err) {
+          if (err) return reject(err);
+          resolve(this.lastID);
+        }
+      );
+    });
+    sucursalId = createdSucursal;
+
+    const password = 'testpass123';
+    const passwordHash = bcrypt.hashSync(password, 10);
+
+    await new Promise((resolve, reject) => {
+      db.run(
+        "INSERT INTO users_app (username, password_hash, email, role, sucursal_id, is_active) VALUES (?, ?, ?, 'user', ?, ?)",
+        ['tester', passwordHash, 'test@example.com', sucursalId, true],
+        function (err) {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    });
+
+    const loginRes = await request(app).post('/login').send({ username: 'tester', password });
+    if (loginRes.statusCode !== 200) throw new Error(`Login failed: ${loginRes.statusCode} ${JSON.stringify(loginRes.body)}`);
+    token = loginRes.body.token;
   });
 
   afterAll((done) => {
@@ -29,6 +65,7 @@ describe('Ironing API Endpoints', () => {
     it('should create new ironing personnel', async () => {
       const res = await request(app)
         .post('/ironing-personnel')
+        .set('Authorization', `Bearer ${token}`)
         .send({
           nombre: 'Juan',
           apellido: 'Perez',
@@ -48,6 +85,7 @@ describe('Ironing API Endpoints', () => {
     it('should fail if required fields are missing', async () => {
       const res = await request(app)
         .post('/ironing-personnel')
+        .set('Authorization', `Bearer ${token}`)
         .send({ nombre: 'Ana' });
       
       expect(res.statusCode).toBe(400);
@@ -55,7 +93,7 @@ describe('Ironing API Endpoints', () => {
     });
 
     it('should get all personnel', async () => {
-      const res = await request(app).get('/ironing-personnel');
+      const res = await request(app).get('/ironing-personnel').set('Authorization', `Bearer ${token}`);
       expect(res.statusCode).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body.length).toBeGreaterThan(0);
@@ -64,7 +102,7 @@ describe('Ironing API Endpoints', () => {
 
   describe('Orders -> Ironing Jobs Integration', () => {
     it('should create an order with ironing breakdown and persist an ironing job with piezas_total', async () => {
-      const servicesRes = await request(app).get('/services');
+      const servicesRes = await request(app).get('/services').set('Authorization', `Bearer ${token}`);
       expect(servicesRes.statusCode).toBe(200);
       const services = servicesRes.body;
       expect(Array.isArray(services)).toBe(true);
@@ -74,6 +112,7 @@ describe('Ironing API Endpoints', () => {
 
       const orderRes = await request(app)
         .post('/orders')
+        .set('Authorization', `Bearer ${token}`)
         .send({
           cliente: 'Cliente Docena',
           telefono: '1111111111',
@@ -111,7 +150,7 @@ describe('Ironing API Endpoints', () => {
       expect(orderRes.body).toHaveProperty('orderId');
       const orderId = orderRes.body.orderId;
 
-      const jobsRes = await request(app).get('/ironing-jobs');
+      const jobsRes = await request(app).get('/ironing-jobs').set('Authorization', `Bearer ${token}`);
       expect(jobsRes.statusCode).toBe(200);
       expect(Array.isArray(jobsRes.body)).toBe(true);
       expect(jobsRes.body.length).toBeGreaterThan(0);
@@ -130,6 +169,7 @@ describe('Ironing API Endpoints', () => {
     it('should create a new job', async () => {
       const res = await request(app)
         .post('/ironing-jobs')
+        .set('Authorization', `Bearer ${token}`)
         .send({
           nombre_cliente: 'Maria Lopez',
           cantidad: 10,
@@ -145,6 +185,7 @@ describe('Ironing API Endpoints', () => {
     it('should assign a job to personnel', async () => {
       const res = await request(app)
         .put(`/ironing-jobs/${jobId}/assign`)
+        .set('Authorization', `Bearer ${token}`)
         .send({ asignado_id: personnelId });
       
       expect(res.statusCode).toBe(200);
@@ -152,7 +193,7 @@ describe('Ironing API Endpoints', () => {
     });
 
     it('should complete a job', async () => {
-      const res = await request(app).put(`/ironing-jobs/${jobId}/complete`);
+      const res = await request(app).put(`/ironing-jobs/${jobId}/complete`).set('Authorization', `Bearer ${token}`);
       expect(res.statusCode).toBe(200);
       expect(res.body.success).toBe(true);
     });
@@ -162,6 +203,7 @@ describe('Ironing API Endpoints', () => {
     it('should return payments for completed jobs', async () => {
       const res = await request(app)
         .get('/ironing-payments')
+        .set('Authorization', `Bearer ${token}`)
         .query({ personnel_id: personnelId });
       
       expect(res.statusCode).toBe(200);
@@ -181,6 +223,7 @@ describe('Ironing API Endpoints', () => {
     it('should create a daily limit', async () => {
       const res = await request(app)
         .post('/daily-limits')
+        .set('Authorization', `Bearer ${token}`)
         .send({ date_string: testDate, max_pieces: 100 });
       
       expect(res.statusCode).toBe(201);
@@ -192,7 +235,7 @@ describe('Ironing API Endpoints', () => {
     });
 
     it('should retrieve daily limit by date', async () => {
-      const res = await request(app).get(`/daily-limits?date=${testDate}`);
+      const res = await request(app).get(`/daily-limits?date=${testDate}`).set('Authorization', `Bearer ${token}`);
       expect(res.statusCode).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body[0].max_pieces).toBe(100);
@@ -201,6 +244,7 @@ describe('Ironing API Endpoints', () => {
     it('should successfully add pieces within limit', async () => {
       const res = await request(app)
         .post('/daily-limits/add-pieces')
+        .set('Authorization', `Bearer ${token}`)
         .send({ date_string: testDate, pieces: 40 });
       
       expect(res.statusCode).toBe(200);
@@ -211,6 +255,7 @@ describe('Ironing API Endpoints', () => {
     it('should block adding pieces if limit exceeded', async () => {
       const res = await request(app)
         .post('/daily-limits/add-pieces')
+        .set('Authorization', `Bearer ${token}`)
         .send({ date_string: testDate, pieces: 70 }); // 40 + 70 = 110 > 100
       
       expect(res.statusCode).toBe(400);
@@ -220,6 +265,7 @@ describe('Ironing API Endpoints', () => {
     it('should allow update to higher limit', async () => {
       const res = await request(app)
         .put(`/daily-limits/${limitId}`)
+        .set('Authorization', `Bearer ${token}`)
         .send({ max_pieces: 150 });
       
       expect(res.statusCode).toBe(200);
@@ -229,6 +275,7 @@ describe('Ironing API Endpoints', () => {
     it('should allow adding pieces after limit increased', async () => {
       const res = await request(app)
         .post('/daily-limits/add-pieces')
+        .set('Authorization', `Bearer ${token}`)
         .send({ date_string: testDate, pieces: 70 }); // 40 + 70 = 110 <= 150
       
       expect(res.statusCode).toBe(200);

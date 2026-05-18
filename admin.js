@@ -169,8 +169,8 @@ async function ensureInitialAdminUser(db) {
   const passwordHash = pbkdf2Hash(password, salt);
   await dbRun(
     db,
-    `INSERT INTO admin_users (username, password_hash, password_salt, role, is_active) VALUES (?, ?, ?, ?, 1)`,
-    [username, passwordHash, salt, 'admin']
+    `INSERT INTO admin_users (username, password_hash, password_salt, role, is_active) VALUES (?, ?, ?, ?, ?)`,
+    [username, passwordHash, salt, 'admin', true]
   );
   console.log(`[ADMIN] Usuario inicial creado: ${username}`);
   console.log(`[ADMIN] Password inicial (cámbiala inmediatamente): ${password}`);
@@ -181,7 +181,7 @@ async function ensureInitialAdminUserWithRetry(db, attemptsLeft = 20) {
     await ensureInitialAdminUser(db);
   } catch (err) {
     const msg = err?.message ?? String(err);
-    if (attemptsLeft > 0 && /no such table/i.test(msg)) {
+    if (attemptsLeft > 0 && (/no such table/i.test(msg) || /relation .* does not exist/i.test(msg))) {
       setTimeout(() => ensureInitialAdminUserWithRetry(db, attemptsLeft - 1), 150);
       return;
     }
@@ -222,14 +222,65 @@ function normalizeColumnName(name) {
 }
 
 async function getTables(db) {
-  const rows = await dbAll(
-    db,
-    `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC`
-  );
+  if (db?.dialect === 'postgres') {
+    const rows = await dbAll(
+      db,
+      `SELECT table_name AS name
+       FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+       ORDER BY table_name ASC`
+    );
+    return rows.map(r => r.name);
+  }
+
+  const rows = await dbAll(db, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC`);
   return rows.map(r => r.name);
 }
 
 async function getTableMeta(db, table) {
+  if (db?.dialect === 'postgres') {
+    const cols = await dbAll(
+      db,
+      `SELECT column_name, data_type, is_nullable, column_default
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = ?
+       ORDER BY ordinal_position ASC`,
+      [table]
+    );
+    const pk = await dbAll(
+      db,
+      `SELECT kcu.column_name
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+       WHERE tc.table_schema = 'public'
+         AND tc.table_name = ?
+         AND tc.constraint_type = 'PRIMARY KEY'
+       ORDER BY kcu.ordinal_position ASC`,
+      [table]
+    );
+    const pkColumns = pk.map(r => r.column_name);
+    const pkPos = new Map(pkColumns.map((c, i) => [c, i + 1]));
+    const columns = cols.map((c, idx) => ({
+      cid: idx,
+      name: c.column_name,
+      type: c.data_type,
+      notnull: String(c.is_nullable || '').toUpperCase() === 'NO',
+      dflt_value: c.column_default ?? null,
+      pk: pkPos.get(c.column_name) ?? 0
+    }));
+
+    const textColumns = columns
+      .filter(c => /text|character varying|character|uuid/i.test(String(c.type || '')))
+      .map(c => c.name);
+    const numericColumns = columns
+      .filter(c => /integer|bigint|smallint|numeric|real|double precision/i.test(String(c.type || '')))
+      .map(c => c.name);
+    const columnSet = new Set(columns.map(c => c.name));
+    return { columns, pkColumns, textColumns, numericColumns, columnSet };
+  }
+
   const cols = await dbAll(db, `PRAGMA table_info(${table})`);
   const columns = cols.map(c => ({
     cid: c.cid,
@@ -240,12 +291,8 @@ async function getTableMeta(db, table) {
     pk: Number(c.pk || 0)
   }));
   const pkColumns = columns.filter(c => c.pk > 0).sort((a, b) => a.pk - b.pk).map(c => c.name);
-  const textColumns = columns
-    .filter(c => /CHAR|CLOB|TEXT/i.test(String(c.type || '')))
-    .map(c => c.name);
-  const numericColumns = columns
-    .filter(c => /INT|REAL|FLOA|DOUB|NUM/i.test(String(c.type || '')))
-    .map(c => c.name);
+  const textColumns = columns.filter(c => /CHAR|CLOB|TEXT/i.test(String(c.type || ''))).map(c => c.name);
+  const numericColumns = columns.filter(c => /INT|REAL|FLOA|DOUB|NUM/i.test(String(c.type || ''))).map(c => c.name);
   const columnSet = new Set(columns.map(c => c.name));
   return { columns, pkColumns, textColumns, numericColumns, columnSet };
 }
@@ -356,7 +403,20 @@ function escapeCsv(value) {
   return s;
 }
 
-async function createBackup(db, requestId, actorUserId, reason) {
+async function createBackup(db, requestId, actorUserId, reason, backupJson) {
+  const payload = backupJson === undefined ? null : JSON.stringify(backupJson);
+
+  if (db?.dialect === 'postgres') {
+    await dbRun(db, `INSERT INTO admin_backups (request_id, actor_user_id, reason, backup_path, backup_json) VALUES (?, ?, ?, ?, ?)`, [
+      requestId,
+      actorUserId ?? null,
+      String(reason || ''),
+      null,
+      payload
+    ]);
+    return null;
+  }
+
   const dbPath = db?.dbPath;
   const dataDir = db?.dataDir;
   if (!dbPath || !dataDir) return null;
@@ -377,11 +437,12 @@ async function createBackup(db, requestId, actorUserId, reason) {
     fs.copyFileSync(dbPath, backupPath);
   }
 
-  await dbRun(db, `INSERT INTO admin_backups (request_id, actor_user_id, reason, backup_path) VALUES (?, ?, ?, ?)`, [
+  await dbRun(db, `INSERT INTO admin_backups (request_id, actor_user_id, reason, backup_path, backup_json) VALUES (?, ?, ?, ?, ?)`, [
     requestId,
     actorUserId ?? null,
     String(reason || ''),
-    backupPath
+    backupPath,
+    payload
   ]);
   return backupPath;
 }
@@ -631,7 +692,7 @@ function createAdminRouter(db) {
 
       if (columns.length === 0) return res.status(400).json({ error: 'No valid columns' });
 
-      await createBackup(db, requestId, Number(req.admin.sub), `CREATE ${table}`);
+      await createBackup(db, requestId, Number(req.admin.sub), `CREATE ${table}`, { table, action: 'CREATE', input: data });
 
       const placeholders = columns.map(() => '?').join(',');
       const sql = `INSERT INTO ${table} (${columns.join(',')}) VALUES (${placeholders})`;
@@ -681,7 +742,12 @@ function createAdminRouter(db) {
         .filter(k => k && meta.columnSet.has(k) && k !== pk);
       if (columns.length === 0) return res.status(400).json({ error: 'No valid columns' });
 
-      await createBackup(db, requestId, Number(req.admin.sub), `UPDATE ${table} ${pk}=${id}`);
+      await createBackup(db, requestId, Number(req.admin.sub), `UPDATE ${table} ${pk}=${id}`, {
+        table,
+        action: 'UPDATE',
+        record_pk: String(id),
+        before: applyEncryptionToRow(table, before, encryptColumnsSet, 'decrypt')
+      });
 
       const setSql = columns.map(c => `${c} = ?`).join(', ');
       const params = [...columns.map(c => input[c]), id];
@@ -727,7 +793,12 @@ function createAdminRouter(db) {
       const before = await dbGet(db, `SELECT * FROM ${table} WHERE ${pk} = ?`, [id]);
       if (!before) return res.status(404).json({ error: 'Row not found' });
 
-      await createBackup(db, requestId, Number(req.admin.sub), `DELETE ${table} ${pk}=${id}`);
+      await createBackup(db, requestId, Number(req.admin.sub), `DELETE ${table} ${pk}=${id}`, {
+        table,
+        action: 'DELETE',
+        record_pk: String(id),
+        before: applyEncryptionToRow(table, before, encryptColumnsSet, 'decrypt')
+      });
       const result = await dbRun(db, `DELETE FROM ${table} WHERE ${pk} = ?`, [id]);
 
       await audit(db, {
@@ -918,7 +989,7 @@ function createAdminRouter(db) {
     const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const role = typeof req.body?.role === 'string' ? req.body.role.trim() : 'viewer';
-    const isActive = req.body?.is_active === undefined ? 1 : req.body.is_active ? 1 : 0;
+    const isActive = req.body?.is_active === undefined ? true : !!req.body.is_active;
 
     if (!username || !password) return res.status(400).json({ error: 'Missing username or password' });
     if (!['viewer', 'editor', 'admin'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
@@ -952,7 +1023,7 @@ function createAdminRouter(db) {
     const userId = String(req.params.id || '').trim();
     if (!userId) return res.status(400).json({ error: 'Invalid user id' });
     const role = req.body?.role !== undefined ? String(req.body.role).trim() : undefined;
-    const isActive = req.body?.is_active !== undefined ? (req.body.is_active ? 1 : 0) : undefined;
+    const isActive = req.body?.is_active !== undefined ? !!req.body.is_active : undefined;
     const password = req.body?.password !== undefined ? String(req.body.password) : undefined;
 
     try {
