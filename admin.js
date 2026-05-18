@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const ExcelJS = require('exceljs');
@@ -530,10 +531,17 @@ function createAdminRouter(db) {
         return res.status(423).json({ error: 'Account locked. Try later.' });
       }
 
-      const hash = pbkdf2Hash(password, user.password_salt);
-      const ok =
-        Buffer.byteLength(hash) === Buffer.byteLength(user.password_hash) &&
-        crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(user.password_hash));
+      const storedHash = String(user.password_hash || '');
+      const usesBcrypt = String(user.password_salt || '') === 'bcrypt' || /^\$2[aby]\$/.test(storedHash);
+      const ok = usesBcrypt
+        ? bcrypt.compareSync(String(password), storedHash)
+        : (() => {
+            const hash = pbkdf2Hash(password, user.password_salt);
+            return (
+              Buffer.byteLength(hash) === Buffer.byteLength(storedHash) &&
+              crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(storedHash))
+            );
+          })();
 
       if (!ok) {
         const failed = Number(user.failed_attempts || 0) + 1;
@@ -674,6 +682,16 @@ function createAdminRouter(db) {
     if (!data) return res.status(400).json({ error: 'Missing data' });
 
     try {
+      if (table === 'users_app' && String(req.admin?.role || '') !== 'admin') {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (table === 'users_app' && data.password_hash !== undefined && data.password_hash !== null && String(data.password_hash).trim()) {
+        const v = String(data.password_hash).trim();
+        if (!/^\$2[aby]\$\d\d\$.{40,}/.test(v)) {
+          return res.status(400).json({ error: 'password_hash must be bcrypt' });
+        }
+      }
+
       const tables = await getTables(db);
       if (!tables.includes(table)) return res.status(404).json({ error: 'Table not found' });
       const meta = await getTableMeta(db, table);
@@ -727,6 +745,16 @@ function createAdminRouter(db) {
     if (!data) return res.status(400).json({ error: 'Missing data' });
 
     try {
+      if (table === 'users_app' && String(req.admin?.role || '') !== 'admin') {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (table === 'users_app' && data.password_hash !== undefined && data.password_hash !== null && String(data.password_hash).trim()) {
+        const v = String(data.password_hash).trim();
+        if (!/^\$2[aby]\$\d\d\$.{40,}/.test(v)) {
+          return res.status(400).json({ error: 'password_hash must be bcrypt' });
+        }
+      }
+
       const tables = await getTables(db);
       if (!tables.includes(table)) return res.status(404).json({ error: 'Table not found' });
       const meta = await getTableMeta(db, table);
@@ -988,18 +1016,31 @@ function createAdminRouter(db) {
     const requestId = makeRequestId();
     const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const passwordHashBcrypt =
+      typeof req.body?.password_hash_bcrypt === 'string' ? req.body.password_hash_bcrypt.trim() : '';
     const role = typeof req.body?.role === 'string' ? req.body.role.trim() : 'viewer';
     const isActive = req.body?.is_active === undefined ? true : !!req.body.is_active;
 
-    if (!username || !password) return res.status(400).json({ error: 'Missing username or password' });
+    if (!username || (!password && !passwordHashBcrypt)) return res.status(400).json({ error: 'Missing username or password' });
     if (!['viewer', 'editor', 'admin'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
     try {
-      const salt = makeSalt();
-      const passwordHash = pbkdf2Hash(password, salt);
+      let passwordSalt;
+      let passwordHash;
+      if (passwordHashBcrypt) {
+        if (!/^\$2[aby]\$\d\d\$.{40,}/.test(passwordHashBcrypt)) {
+          return res.status(400).json({ error: 'Invalid password hash' });
+        }
+        passwordSalt = 'bcrypt';
+        passwordHash = passwordHashBcrypt;
+      } else {
+        const salt = makeSalt();
+        passwordSalt = salt;
+        passwordHash = pbkdf2Hash(password, salt);
+      }
       const result = await dbRun(
         db,
         `INSERT INTO admin_users (username, password_hash, password_salt, role, is_active) VALUES (?, ?, ?, ?, ?)`,
-        [username, passwordHash, salt, role, isActive]
+        [username, passwordHash, passwordSalt, role, isActive]
       );
       await audit(db, {
         request_id: requestId,
@@ -1025,6 +1066,8 @@ function createAdminRouter(db) {
     const role = req.body?.role !== undefined ? String(req.body.role).trim() : undefined;
     const isActive = req.body?.is_active !== undefined ? !!req.body.is_active : undefined;
     const password = req.body?.password !== undefined ? String(req.body.password) : undefined;
+    const passwordHashBcrypt =
+      req.body?.password_hash_bcrypt !== undefined ? String(req.body.password_hash_bcrypt).trim() : undefined;
 
     try {
       const before = await dbGet(db, `SELECT * FROM admin_users WHERE id = ?`, [userId]);
@@ -1041,7 +1084,16 @@ function createAdminRouter(db) {
         updates.push('is_active = ?');
         params.push(isActive);
       }
-      if (password !== undefined && password.trim()) {
+      if (passwordHashBcrypt !== undefined && passwordHashBcrypt) {
+        if (!/^\$2[aby]\$\d\d\$.{40,}/.test(passwordHashBcrypt)) {
+          return res.status(400).json({ error: 'Invalid password hash' });
+        }
+        updates.push('password_hash = ?');
+        updates.push('password_salt = ?');
+        updates.push('failed_attempts = 0');
+        updates.push('locked_until_ms = NULL');
+        params.push(passwordHashBcrypt, 'bcrypt');
+      } else if (password !== undefined && password.trim()) {
         const salt = makeSalt();
         const passwordHash = pbkdf2Hash(password, salt);
         updates.push('password_hash = ?');

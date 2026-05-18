@@ -275,6 +275,10 @@ app.put('/sucursales/:id', requireAdmin, (req, res) => {
 
 app.use('/admin/api', createAdminRouter(db));
 
+app.get('/admin/vendor/bcrypt.js', (req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', 'bcryptjs', 'umd', 'index.js'));
+});
+
 app.use('/admin', (req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');

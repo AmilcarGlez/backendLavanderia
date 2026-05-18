@@ -14,8 +14,49 @@ const state = {
   dir: 'desc',
   q: '',
   filters: [],
-  editing: null
+  editing: null,
+  usersPasswordDirty: new Map()
 };
+
+const PASSWORD_POLICY = {
+  minLen: 10,
+  requireLower: true,
+  requireUpper: true,
+  requireDigit: true
+};
+
+function isBcryptAvailable() {
+  return typeof window.bcrypt === 'object' && typeof window.bcrypt.hash === 'function';
+}
+
+function passwordComplexityError(password) {
+  const p = String(password || '');
+  if (p.length < PASSWORD_POLICY.minLen) return `La contraseña debe tener mínimo ${PASSWORD_POLICY.minLen} caracteres`;
+  if (PASSWORD_POLICY.requireLower && !/[a-z]/.test(p)) return 'La contraseña debe incluir una letra minúscula';
+  if (PASSWORD_POLICY.requireUpper && !/[A-Z]/.test(p)) return 'La contraseña debe incluir una letra mayúscula';
+  if (PASSWORD_POLICY.requireDigit && !/[0-9]/.test(p)) return 'La contraseña debe incluir un número';
+  return null;
+}
+
+async function bcryptHash(password) {
+  if (!isBcryptAvailable()) throw new Error('bcrypt no está disponible en el navegador');
+  const rounds = 12;
+  return await new Promise((resolve, reject) => {
+    window.bcrypt.hash(String(password), rounds, (err, hash) => {
+      if (err) reject(err);
+      else resolve(hash);
+    });
+  });
+}
+
+function formatUsersError(err) {
+  if (!err || typeof err !== 'object') return 'Error desconocido';
+  if (!('status' in err)) return 'Error de conexión. Verifica tu red y que el servidor esté activo.';
+  if (err.status === 401) return 'Sesión expirada. Inicia sesión nuevamente.';
+  if (err.status === 403) return 'Permisos insuficientes (se requiere rol admin).';
+  if (err.status === 400) return err.message || 'Solicitud inválida.';
+  return err.message || `Error ${err.status}`;
+}
 
 function setHidden(id, hidden) {
   const node = el(id);
@@ -312,6 +353,11 @@ function validateField(col, value) {
     return 'Requerido';
   }
   if (String(value).trim() === '') return null;
+  if (state.currentTable === 'users_app' && col.name === 'password_hash') {
+    const v = String(value);
+    if (/^\$2[aby]\$\d\d\$.{40,}/.test(v)) return null;
+    return passwordComplexityError(v);
+  }
   if (/INT|REAL|FLOA|DOUB|NUM/.test(type)) {
     const n = Number(value);
     if (!Number.isFinite(n)) return 'Número inválido';
@@ -338,8 +384,15 @@ function openRowDialog(mode, row) {
     name.textContent = `${col.name}${col.notnull ? ' *' : ''}`;
     const input = document.createElement('input');
     input.name = col.name;
-    input.value = toInputValue(mode === 'new' ? '' : row?.[col.name]);
-    input.placeholder = col.type || '';
+    if (state.currentTable === 'users_app' && col.name === 'password_hash') {
+      input.type = 'password';
+      input.autocomplete = mode === 'new' ? 'new-password' : 'new-password';
+      input.value = '';
+      input.placeholder = mode === 'new' ? 'Contraseña (se guardará en hash bcrypt)' : 'Dejar vacío para no cambiar';
+    } else {
+      input.value = toInputValue(mode === 'new' ? '' : row?.[col.name]);
+      input.placeholder = col.type || '';
+    }
     input.dataset.type = col.type || '';
     input.dataset.notnull = col.notnull ? '1' : '0';
     input.disabled = !canEditPk && pk === col.name;
@@ -350,6 +403,12 @@ function openRowDialog(mode, row) {
     });
     wrap.appendChild(name);
     wrap.appendChild(input);
+    if (state.currentTable === 'users_app' && col.name === 'password_hash') {
+      const note = document.createElement('div');
+      note.className = 'inline-note';
+      note.textContent = `Requisitos: mínimo ${PASSWORD_POLICY.minLen}, mayúscula, minúscula y número.`;
+      wrap.appendChild(note);
+    }
     fields.appendChild(wrap);
   }
 
@@ -381,6 +440,17 @@ async function saveRowFromDialog() {
   }
 
   try {
+    if (state.currentTable === 'users_app' && data.password_hash) {
+      const v = String(data.password_hash);
+      if (!/^\$2[aby]\$\d\d\$.{40,}/.test(v)) {
+        if (!isBcryptAvailable()) throw new Error('No se pudo cargar bcrypt en el navegador.');
+        const complexityErr = passwordComplexityError(v);
+        if (complexityErr) throw new Error(complexityErr);
+        const hash = await bcryptHash(v);
+        data.password_hash = hash;
+      }
+    }
+
     if (mode === 'new') {
       await apiFetch(`/admin/api/tables/${encodeURIComponent(state.currentTable)}/rows`, {
         method: 'POST',
@@ -397,7 +467,7 @@ async function saveRowFromDialog() {
     el('rowDialog').close();
     await queryRows();
   } catch (err) {
-    showError('rowError', err.message);
+    showError('rowError', err?.message || 'Error de conexión');
   }
 }
 
@@ -536,6 +606,45 @@ async function openUsers() {
     selA.appendChild(optN);
     selA.value = u.is_active ? '1' : '0';
     tdActive.appendChild(selA);
+
+    const tdPass = document.createElement('td');
+    const passWrap = document.createElement('div');
+    passWrap.style.display = 'grid';
+    passWrap.style.gap = '6px';
+    const passInput = document.createElement('input');
+    passInput.className = 'input-sm';
+    passInput.type = 'password';
+    passInput.autocomplete = 'new-password';
+    passInput.placeholder = 'Nueva contraseña…';
+    const passNote = document.createElement('div');
+    passNote.className = 'inline-note';
+    passNote.textContent = '';
+    const dirtyKey = String(u.id);
+    state.usersPasswordDirty.set(dirtyKey, false);
+    passInput.addEventListener('input', () => {
+      const v = passInput.value || '';
+      if (!v) {
+        state.usersPasswordDirty.set(dirtyKey, false);
+        passNote.textContent = '';
+        passNote.classList.remove('warn', 'ok');
+        return;
+      }
+      state.usersPasswordDirty.set(dirtyKey, true);
+      const err = passwordComplexityError(v);
+      if (err) {
+        passNote.textContent = err;
+        passNote.classList.add('warn');
+        passNote.classList.remove('ok');
+      } else {
+        passNote.textContent = 'Lista para guardar (se enviará solo el hash)';
+        passNote.classList.add('ok');
+        passNote.classList.remove('warn');
+      }
+    });
+    passWrap.appendChild(passInput);
+    passWrap.appendChild(passNote);
+    tdPass.appendChild(passWrap);
+
     const tdLock = document.createElement('td');
     tdLock.textContent = u.locked_until_ms ? `hasta ${new Date(Number(u.locked_until_ms)).toISOString()}` : '';
     const tdAct = document.createElement('td');
@@ -545,38 +654,34 @@ async function openUsers() {
     btnSave.textContent = 'Guardar';
     btnSave.addEventListener('click', async () => {
       try {
+        btnSave.disabled = true;
+        const payload = { role: sel.value, is_active: selA.value === '1' };
+        const plain = passInput.value || '';
+        if (plain) {
+          const err = passwordComplexityError(plain);
+          if (err) throw Object.assign(new Error(err), { status: 400 });
+          const hash = await bcryptHash(plain);
+          payload.password_hash_bcrypt = hash;
+        }
         await apiFetch(`/admin/api/users/${encodeURIComponent(u.id)}`, {
           method: 'PATCH',
-          body: JSON.stringify({ role: sel.value, is_active: selA.value === '1' })
+          body: JSON.stringify(payload)
         });
+        passInput.value = '';
+        passInput.dispatchEvent(new Event('input'));
         await openUsers();
       } catch (err) {
-        showError('usersError', err.message);
-      }
-    });
-    const btnPass = document.createElement('button');
-    btnPass.className = 'btn btn-secondary btn-sm';
-    btnPass.type = 'button';
-    btnPass.textContent = 'Reset pass';
-    btnPass.addEventListener('click', async () => {
-      const p = prompt(`Nueva contraseña para ${u.username}`);
-      if (!p) return;
-      try {
-        await apiFetch(`/admin/api/users/${encodeURIComponent(u.id)}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ password: p })
-        });
-        await openUsers();
-      } catch (err) {
-        showError('usersError', err.message);
+        showError('usersError', formatUsersError(err));
+      } finally {
+        btnSave.disabled = false;
       }
     });
     tdAct.appendChild(btnSave);
-    tdAct.appendChild(btnPass);
     tr.appendChild(tdId);
     tr.appendChild(tdUser);
     tr.appendChild(tdRole);
     tr.appendChild(tdActive);
+    tr.appendChild(tdPass);
     tr.appendChild(tdLock);
     tr.appendChild(tdAct);
     body.appendChild(tr);
@@ -685,15 +790,25 @@ function bindUi() {
       return;
     }
     try {
+      const err = passwordComplexityError(password);
+      if (err) {
+        showError('usersError', err);
+        return;
+      }
+      if (!isBcryptAvailable()) {
+        showError('usersError', 'No se pudo cargar bcrypt en el navegador.');
+        return;
+      }
+      const hash = await bcryptHash(password);
       await apiFetch(`/admin/api/users`, {
         method: 'POST',
-        body: JSON.stringify({ username, password, role, is_active: isActive })
+        body: JSON.stringify({ username, password_hash_bcrypt: hash, role, is_active: isActive })
       });
       el('newUserUsername').value = '';
       el('newUserPassword').value = '';
       await openUsers();
     } catch (err) {
-      showError('usersError', err.message);
+      showError('usersError', formatUsersError(err));
     }
   });
 }

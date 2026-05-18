@@ -1,3 +1,4 @@
+process.env.DATABASE_URL = '';
 const request = require('supertest');
 const bcrypt = require('bcryptjs');
 const app = require('./index');
@@ -57,9 +58,7 @@ describe('Ironing API Endpoints', () => {
     token = loginRes.body.token;
   });
 
-  afterAll((done) => {
-    db.close(done);
-  });
+  afterAll(() => {});
 
   describe('Personnel Management', () => {
     it('should create new ironing personnel', async () => {
@@ -211,7 +210,7 @@ describe('Ironing API Endpoints', () => {
       expect(res.body.length).toBeGreaterThan(0);
       
       const payment = res.body[0];
-      expect(payment.pago_total).toBe(55); // 10 pieces * 5.5 rate
+      expect(Number(payment.pago_total)).toBe(55); // 10 pieces * 5.5 rate
       expect(payment.personnel_id).toBe(personnelId);
     });
   });

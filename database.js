@@ -605,6 +605,7 @@ function initSqliteSchema(db) {
     ensureColumn('admin_users', 'failed_attempts', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn('admin_users', 'locked_until_ms', 'INTEGER');
     ensureColumn('admin_users', 'role', "TEXT NOT NULL DEFAULT 'admin'");
+    ensureColumn('admin_backups', 'backup_json', 'TEXT');
 
     db.get('SELECT COUNT(*) as count FROM services', (err, row) => {
       if (err) return;

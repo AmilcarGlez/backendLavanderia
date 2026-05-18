@@ -245,6 +245,25 @@ input, select {
   font-size: 12px;
 }
 
+.input-sm {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.inline-note {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.warn {
+  color: #991b1b;
+}
+
+.ok {
+  color: #065f46;
+}
+
 .chip button {
   border: 0;
   background: transparent;
