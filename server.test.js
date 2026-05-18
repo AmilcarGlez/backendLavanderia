@@ -162,6 +162,38 @@ describe('Ironing API Endpoints', () => {
       expect(Array.isArray(parsed.breakdown)).toBe(true);
       expect(parsed.breakdown[0].tipo_orden).toBe('DOCENA_COMPLETA');
     });
+
+    it('should fetch order details with items', async () => {
+      const servicesRes = await request(app).get('/services').set('Authorization', `Bearer ${token}`);
+      expect(servicesRes.statusCode).toBe(200);
+      const services = servicesRes.body;
+      const anyService = Array.isArray(services) && services.length ? services[0] : null;
+      expect(anyService).toBeTruthy();
+
+      const orderRes = await request(app)
+        .post('/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          cliente: 'Cliente Detalle',
+          telefono: '3333333333',
+          express: false,
+          metodo_pago: 'Efectivo',
+          total: 10,
+          fecha_entrega: '2026-04-01',
+          fecha_entrega_tz: 'America/Mexico_City',
+          items: [{ service_id: anyService.id, cantidad: 2, precio: 5 }]
+        });
+
+      expect(orderRes.statusCode).toBe(201);
+      const id = orderRes.body.orderId;
+
+      const detailRes = await request(app).get(`/orders/${id}`).set('Authorization', `Bearer ${token}`);
+      expect(detailRes.statusCode).toBe(200);
+      expect(detailRes.body).toHaveProperty('order');
+      expect(detailRes.body.order.id).toBe(id);
+      expect(Array.isArray(detailRes.body.items)).toBe(true);
+      expect(detailRes.body.items.length).toBeGreaterThan(0);
+    });
   });
 
   describe('Jobs Management', () => {
@@ -280,6 +312,58 @@ describe('Ironing API Endpoints', () => {
       expect(res.statusCode).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.accumulated_pieces).toBe(110);
+    });
+  });
+
+  describe('Sales History API', () => {
+    it('should include credit anticipo in /sales and /sales/summary', async () => {
+      const servicesRes = await request(app).get('/services').set('Authorization', `Bearer ${token}`);
+      expect(servicesRes.statusCode).toBe(200);
+      const services = servicesRes.body;
+      const anyService = Array.isArray(services) && services.length ? services[0] : null;
+      expect(anyService).toBeTruthy();
+
+      const today = new Date().toISOString().slice(0, 10);
+
+      const orderRes = await request(app)
+        .post('/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          cliente: 'Cliente Crédito',
+          telefono: '2222222222',
+          express: false,
+          metodo_pago: 'Crédito',
+          total: 100,
+          anticipo: 20,
+          fecha_entrega: today,
+          fecha_entrega_tz: 'America/Mexico_City',
+          items: [{ service_id: anyService.id, cantidad: 1, precio: 120 }]
+        });
+
+      expect(orderRes.statusCode).toBe(201);
+      expect(orderRes.body).toHaveProperty('orderId');
+
+      const salesRes = await request(app)
+        .get('/sales')
+        .set('Authorization', `Bearer ${token}`)
+        .query({ start: today, end: today, payment: 'credito' });
+
+      expect(salesRes.statusCode).toBe(200);
+      expect(Array.isArray(salesRes.body)).toBe(true);
+      expect(salesRes.body.length).toBeGreaterThan(0);
+      const row = salesRes.body.find(r => r.id === orderRes.body.orderId) ?? salesRes.body[0];
+      expect(Number(row.anticipo)).toBe(20);
+      expect(Number(row.total_operacion)).toBe(120);
+      expect(String(row.metodo_pago_resuelto)).toBe('Crédito');
+
+      const summaryRes = await request(app)
+        .get('/sales/summary')
+        .set('Authorization', `Bearer ${token}`)
+        .query({ start: today, end: today });
+
+      expect(summaryRes.statusCode).toBe(200);
+      expect(Number(summaryRes.body.anticipos_efectivo)).toBeGreaterThanOrEqual(20);
+      expect(Number(summaryRes.body.efectivo_caja)).toBeGreaterThanOrEqual(20);
     });
   });
 });

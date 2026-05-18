@@ -379,7 +379,7 @@ app.delete('/services/:id', (req, res) => {
 
 // Create an order
 app.post('/orders', (req, res) => {
-  const { cliente, telefono, express, metodo_pago, total, items, fecha_entrega, fecha_entrega_tz, ironing } = req.body;
+  const { cliente, telefono, express, metodo_pago, total, anticipo, items, fecha_entrega, fecha_entrega_tz, ironing } = req.body;
 
   const isValidIsoDate = (value) => {
     if (typeof value !== 'string') return false;
@@ -399,6 +399,18 @@ app.post('/orders', (req, res) => {
     return;
   }
 
+  const totalNum = Number(total);
+  if (!Number.isFinite(totalNum) || totalNum < 0) {
+    res.status(400).json({ error: 'Invalid total' });
+    return;
+  }
+
+  const anticipoNum = anticipo === undefined || anticipo === null || anticipo === '' ? 0 : Number(anticipo);
+  if (!Number.isFinite(anticipoNum) || anticipoNum < 0) {
+    res.status(400).json({ error: 'Invalid anticipo' });
+    return;
+  }
+
   const fechaEntregaIso = String(fecha_entrega).trim();
   if (!isValidIsoDate(fechaEntregaIso)) {
     res.status(400).json({ error: 'Invalid fecha_entrega. Expected YYYY-MM-DD' });
@@ -411,8 +423,8 @@ app.post('/orders', (req, res) => {
     db.run('BEGIN TRANSACTION');
 
     db.run(
-      `INSERT INTO orders (cliente, telefono, express, metodo_pago, total, fecha_entrega, fecha_entrega_tz, sucursal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [cliente, telefono || '', !!express, metodo_pago, total, fechaEntregaIso, tz, req.user?.sucursal_id],
+      `INSERT INTO orders (cliente, telefono, express, metodo_pago, total, anticipo, fecha_entrega, fecha_entrega_tz, sucursal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [cliente, telefono || '', !!express, metodo_pago, totalNum, anticipoNum, fechaEntregaIso, tz, req.user?.sucursal_id],
       function (err) {
         if (err) {
           db.run('ROLLBACK');
@@ -519,6 +531,163 @@ app.post('/orders', (req, res) => {
   });
 });
 
+const isValidIsoDateQuery = (value) => {
+  if (typeof value !== 'string') return false;
+  const v = value.trim();
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return false;
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+};
+
+const resolvePaymentBucket = (metodoPago) => {
+  const m = String(metodoPago ?? '').trim();
+  if (!m) return '';
+  if (m.startsWith('Crédito (Pagado: Efectivo)')) return 'Efectivo';
+  if (m.startsWith('Crédito (Pagado: Tarjeta)')) return 'Tarjeta';
+  if (m.startsWith('Efectivo')) return 'Efectivo';
+  if (m.startsWith('Tarjeta')) return 'Tarjeta';
+  if (m.startsWith('Crédito')) return 'Crédito';
+  return m;
+};
+
+const normalizePaymentFilter = (value) => {
+  const v = String(value ?? '').trim().toLowerCase();
+  if (!v || v === 'all') return null;
+  if (v === 'efectivo') return 'Efectivo';
+  if (v === 'tarjeta') return 'Tarjeta';
+  if (v === 'credito' || v === 'crédito') return 'Crédito';
+  return null;
+};
+
+app.get('/sales', (req, res) => {
+  const start = String(req.query.start ?? '').trim();
+  const end = String(req.query.end ?? '').trim();
+  const payment = normalizePaymentFilter(req.query.payment);
+
+  if (!start || !end) {
+    return res.status(400).json({ error: 'Missing start/end. Expected YYYY-MM-DD' });
+  }
+  if (!isValidIsoDateQuery(start) || !isValidIsoDateQuery(end)) {
+    return res.status(400).json({ error: 'Invalid start/end. Expected YYYY-MM-DD' });
+  }
+
+  const dateExpr =
+    db.dialect === 'postgres'
+      ? `DATE(orders.fecha AT TIME ZONE 'America/Mexico_City')`
+      : `DATE(orders.fecha)`;
+
+  const where = [`orders.sucursal_id = ?`, `${dateExpr} BETWEEN ? AND ?`];
+  const params = [req.user?.sucursal_id, start, end];
+
+  const sql = `SELECT
+    orders.id,
+    orders.cliente,
+    orders.telefono,
+    orders.metodo_pago,
+    COALESCE(orders.total, 0) as total,
+    COALESCE(orders.anticipo, 0) as anticipo,
+    orders.fecha
+  FROM orders
+  WHERE ${where.join(' AND ')}
+  ORDER BY orders.fecha DESC, orders.id DESC`;
+
+  db.all(sql, params, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const list = Array.isArray(rows) ? rows : [];
+    const mapped = list
+      .map((r) => {
+        const bucket = resolvePaymentBucket(r?.metodo_pago);
+        const total = Number(r?.total) || 0;
+        const anticipo = Number(r?.anticipo) || 0;
+        const total_operacion = total + anticipo;
+        const efectivo_recibido =
+          String(r?.metodo_pago ?? '').startsWith('Crédito (Pagado: Efectivo)') ? total_operacion : bucket === 'Efectivo' ? total_operacion : bucket === 'Crédito' ? anticipo : 0;
+        return {
+          id: r?.id,
+          cliente: r?.cliente ?? '',
+          telefono: r?.telefono ?? '',
+          metodo_pago: r?.metodo_pago ?? '',
+          metodo_pago_resuelto: bucket,
+          total,
+          anticipo,
+          total_operacion,
+          efectivo_recibido,
+          fecha: r?.fecha
+        };
+      })
+      .filter((r) => (payment ? r.metodo_pago_resuelto === payment : true));
+    res.json(mapped);
+  });
+});
+
+app.get('/sales/summary', (req, res) => {
+  const start = String(req.query.start ?? '').trim();
+  const end = String(req.query.end ?? '').trim();
+  if (!start || !end) {
+    return res.status(400).json({ error: 'Missing start/end. Expected YYYY-MM-DD' });
+  }
+  if (!isValidIsoDateQuery(start) || !isValidIsoDateQuery(end)) {
+    return res.status(400).json({ error: 'Invalid start/end. Expected YYYY-MM-DD' });
+  }
+
+  const dateExpr =
+    db.dialect === 'postgres'
+      ? `DATE(orders.fecha AT TIME ZONE 'America/Mexico_City')`
+      : `DATE(orders.fecha)`;
+
+  const sql = `SELECT
+    COUNT(*) as total_transacciones,
+    SUM(COALESCE(orders.total,0) + COALESCE(orders.anticipo,0)) as ingresos_totales,
+    SUM(CASE
+      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Crédito%' THEN COALESCE(orders.anticipo,0)
+      ELSE 0
+    END) as efectivo_caja,
+    SUM(CASE
+      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      ELSE 0
+    END) as efectivo_total,
+    SUM(CASE
+      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Tarjeta)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Tarjeta%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      ELSE 0
+    END) as tarjeta_total,
+    SUM(CASE
+      WHEN orders.metodo_pago LIKE 'Crédito%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      ELSE 0
+    END) as credito_total,
+    SUM(CASE
+      WHEN orders.metodo_pago LIKE 'Crédito%' THEN COALESCE(orders.anticipo,0)
+      ELSE 0
+    END) as anticipos_efectivo
+  FROM orders
+  WHERE orders.sucursal_id = ?
+    AND ${dateExpr} BETWEEN ? AND ?`;
+
+  db.get(sql, [req.user?.sucursal_id, start, end], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const r = row || {};
+    res.json({
+      start,
+      end,
+      total_transacciones: Number(r.total_transacciones) || 0,
+      ingresos_totales: Number(r.ingresos_totales) || 0,
+      efectivo_caja: Number(r.efectivo_caja) || 0,
+      efectivo_total: Number(r.efectivo_total) || 0,
+      tarjeta_total: Number(r.tarjeta_total) || 0,
+      credito_total: Number(r.credito_total) || 0,
+      anticipos_efectivo: Number(r.anticipos_efectivo) || 0
+    });
+  });
+});
+
 // Get all orders
 app.get('/orders', (req, res) => {
   db.all('SELECT * FROM orders WHERE sucursal_id = ? ORDER BY id DESC', [req.user?.sucursal_id], (err, rows) => {
@@ -527,6 +696,38 @@ app.get('/orders', (req, res) => {
       return;
     }
     res.json(rows);
+  });
+});
+
+app.get('/orders/:id', (req, res) => {
+  const idNum = Number(req.params.id);
+  if (!Number.isFinite(idNum) || idNum <= 0) {
+    return res.status(400).json({ error: 'Invalid order id' });
+  }
+
+  db.get('SELECT * FROM orders WHERE id = ? AND sucursal_id = ?', [idNum, req.user?.sucursal_id], (err, order) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    db.all(
+      `SELECT
+        oi.id,
+        oi.service_id,
+        oi.cantidad,
+        oi.precio_unitario,
+        s.nombre as service_nombre,
+        s.categoria as service_categoria,
+        s.icono as service_icono
+      FROM order_items oi
+      LEFT JOIN services s ON s.id = oi.service_id
+      WHERE oi.order_id = ?
+      ORDER BY oi.id ASC`,
+      [idNum],
+      (itemsErr, items) => {
+        if (itemsErr) return res.status(500).json({ error: itemsErr.message });
+        res.json({ order, items: Array.isArray(items) ? items : [] });
+      }
+    );
   });
 });
 
