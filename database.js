@@ -1,4 +1,3 @@
-const sqlite3 = require('sqlite3').verbose();
 const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
@@ -11,6 +10,19 @@ const wantsPostgres =
   !rawDatabaseUrl.includes('<user>') &&
   !rawDatabaseUrl.includes('<host>') &&
   !rawDatabaseUrl.includes('<db>');
+
+function loadSqlite3() {
+  try {
+    return require('sqlite3').verbose();
+  } catch (err) {
+    const msg = err?.message ?? String(err);
+    throw new Error(
+      `sqlite3 no está disponible en este entorno. ` +
+        `Si estás usando PostgreSQL remota, configura DATABASE_URL y no se cargará sqlite3. ` +
+        `Detalle: ${msg}`
+    );
+  }
+}
 
 function replaceQuestionMarks(sql) {
   const s = String(sql);
@@ -379,6 +391,7 @@ async function initPostgresSchema(pgDb) {
 }
 
 function createSqliteDb() {
+  const sqlite3 = loadSqlite3();
   const dataDir = process.env.SQLITE_DATA_DIR ? path.resolve(process.env.SQLITE_DATA_DIR) : path.resolve(__dirname, '.data');
   const dbPath = process.env.SQLITE_DB_PATH ? path.resolve(process.env.SQLITE_DB_PATH) : path.resolve(dataDir, 'lavanderia.db');
 
