@@ -591,6 +591,7 @@ app.get('/sales', (req, res) => {
     orders.metodo_pago,
     COALESCE(orders.total, 0) as total,
     COALESCE(orders.anticipo, 0) as anticipo,
+    COALESCE(orders.liquidacion_monto, 0) as liquidacion_monto,
     orders.fecha
   FROM orders
   WHERE ${where.join(' AND ')}
@@ -604,9 +605,22 @@ app.get('/sales', (req, res) => {
         const bucket = resolvePaymentBucket(r?.metodo_pago);
         const total = Number(r?.total) || 0;
         const anticipo = Number(r?.anticipo) || 0;
-        const total_operacion = total + anticipo;
+        const liquidacion_monto = Number(r?.liquidacion_monto) || 0;
+        const full_total = total + anticipo;
+        const metodoPagoStr = String(r?.metodo_pago ?? '');
+
+        const isCreditoPagadoEfectivo = metodoPagoStr.startsWith('Crédito (Pagado: Efectivo)');
+        const isCreditoPagadoTarjeta = metodoPagoStr.startsWith('Crédito (Pagado: Tarjeta)');
+
+        const total_operacion =
+          bucket === 'Crédito'
+            ? total
+            : isCreditoPagadoEfectivo || isCreditoPagadoTarjeta
+              ? (liquidacion_monto > 0 ? liquidacion_monto : total)
+              : full_total;
+
         const efectivo_recibido =
-          String(r?.metodo_pago ?? '').startsWith('Crédito (Pagado: Efectivo)') ? total_operacion : bucket === 'Efectivo' ? total_operacion : bucket === 'Crédito' ? anticipo : 0;
+          isCreditoPagadoEfectivo ? total_operacion : bucket === 'Efectivo' ? total_operacion : bucket === 'Crédito' ? anticipo : 0;
         return {
           id: r?.id,
           cliente: r?.cliente ?? '',
@@ -615,6 +629,7 @@ app.get('/sales', (req, res) => {
           metodo_pago_resuelto: bucket,
           total,
           anticipo,
+          liquidacion_monto,
           total_operacion,
           efectivo_recibido,
           fecha: r?.fecha
@@ -642,25 +657,35 @@ app.get('/sales/summary', (req, res) => {
 
   const sql = `SELECT
     COUNT(*) as total_transacciones,
-    SUM(COALESCE(orders.total,0) + COALESCE(orders.anticipo,0)) as ingresos_totales,
+    SUM(
+      CASE
+        WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        WHEN orders.metodo_pago LIKE 'Tarjeta%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Tarjeta)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        WHEN orders.metodo_pago LIKE 'Crédito%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        ELSE 0
+      END
+    ) as ingresos_totales,
     SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.anticipo,0) + COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0))
       WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
       WHEN orders.metodo_pago LIKE 'Crédito%' THEN COALESCE(orders.anticipo,0)
       ELSE 0
     END) as efectivo_caja,
     SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.anticipo,0) + COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0))
       WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Crédito%' THEN COALESCE(orders.anticipo,0)
       ELSE 0
     END) as efectivo_total,
     SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Tarjeta)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Tarjeta)%' THEN COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0)
       WHEN orders.metodo_pago LIKE 'Tarjeta%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
       ELSE 0
     END) as tarjeta_total,
     SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+      WHEN orders.metodo_pago LIKE 'Crédito%' AND orders.metodo_pago NOT LIKE 'Crédito (Pagado:%' THEN COALESCE(orders.total,0)
       ELSE 0
     END) as credito_total,
     SUM(CASE
@@ -734,7 +759,7 @@ app.get('/orders/:id', (req, res) => {
 // Update an order (estado, entregado, metodo_pago)
 app.put('/orders/:id', (req, res) => {
   const { id } = req.params;
-  const { estado, entregado, metodo_pago, fecha_entrega, fecha_entrega_tz } = req.body;
+  const { estado, entregado, metodo_pago, fecha_entrega, fecha_entrega_tz, liquidacion_monto } = req.body;
 
   const isValidIsoDate = (value) => {
     if (typeof value !== 'string') return false;
@@ -754,12 +779,21 @@ app.put('/orders/:id', (req, res) => {
     res.status(400).json({ error: 'Invalid fecha_entrega. Expected YYYY-MM-DD' });
     return;
   }
+
+  const hasLiquidacionMonto =
+    liquidacion_monto !== undefined && liquidacion_monto !== null && String(liquidacion_monto).trim() !== '';
+  const liquidacionMontoNum = hasLiquidacionMonto ? Number(liquidacion_monto) : null;
+  if (hasLiquidacionMonto && (!Number.isFinite(liquidacionMontoNum) || liquidacionMontoNum < 0)) {
+    res.status(400).json({ error: 'Invalid liquidacion_monto' });
+    return;
+  }
   
   db.run(
     `UPDATE orders SET 
       estado = COALESCE(?, estado), 
       entregado = COALESCE(?, entregado), 
       metodo_pago = COALESCE(?, metodo_pago),
+      liquidacion_monto = COALESCE(?, liquidacion_monto),
       fecha_entrega = COALESCE(?, fecha_entrega),
       fecha_entrega_tz = COALESCE(?, fecha_entrega_tz)
      WHERE id = ? AND (sucursal_id = ? OR sucursal_id IS NULL)`,
@@ -767,6 +801,7 @@ app.put('/orders/:id', (req, res) => {
       estado,
       entregado !== undefined ? !!entregado : null,
       metodo_pago,
+      hasLiquidacionMonto ? liquidacionMontoNum : null,
       hasFechaEntrega ? String(fecha_entrega).trim() : null,
       typeof fecha_entrega_tz === 'string' && fecha_entrega_tz.trim() ? fecha_entrega_tz.trim() : null,
       id, req.user?.sucursal_id

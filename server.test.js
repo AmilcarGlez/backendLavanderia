@@ -353,7 +353,7 @@ describe('Ironing API Endpoints', () => {
       expect(salesRes.body.length).toBeGreaterThan(0);
       const row = salesRes.body.find(r => r.id === orderRes.body.orderId) ?? salesRes.body[0];
       expect(Number(row.anticipo)).toBe(20);
-      expect(Number(row.total_operacion)).toBe(120);
+      expect(Number(row.total_operacion)).toBe(100);
       expect(String(row.metodo_pago_resuelto)).toBe('Crédito');
 
       const summaryRes = await request(app)
@@ -364,6 +364,66 @@ describe('Ironing API Endpoints', () => {
       expect(summaryRes.statusCode).toBe(200);
       expect(Number(summaryRes.body.anticipos_efectivo)).toBeGreaterThanOrEqual(20);
       expect(Number(summaryRes.body.efectivo_caja)).toBeGreaterThanOrEqual(20);
+      expect(Number(summaryRes.body.credito_total)).toBeGreaterThanOrEqual(100);
+    });
+
+    it('should record only the liquidation amount for a credit payment (tarjeta) in /sales and /sales/summary', async () => {
+      const servicesRes = await request(app).get('/services').set('Authorization', `Bearer ${token}`);
+      expect(servicesRes.statusCode).toBe(200);
+      const services = servicesRes.body;
+      const anyService = Array.isArray(services) && services.length ? services[0] : null;
+      expect(anyService).toBeTruthy();
+
+      const today = new Date().toISOString().slice(0, 10);
+
+      const orderRes = await request(app)
+        .post('/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          cliente: 'Cliente Crédito Liquidación',
+          telefono: '9999999999',
+          express: false,
+          metodo_pago: 'Crédito',
+          total: 80,
+          anticipo: 10,
+          fecha_entrega: today,
+          fecha_entrega_tz: 'America/Mexico_City',
+          items: [{ service_id: anyService.id, cantidad: 1, precio: 90 }]
+        });
+
+      expect(orderRes.statusCode).toBe(201);
+      const orderId = orderRes.body.orderId;
+
+      const payRes = await request(app)
+        .put(`/orders/${orderId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          entregado: true,
+          metodo_pago: 'Crédito (Pagado: Tarjeta)',
+          liquidacion_monto: 80
+        });
+
+      expect(payRes.statusCode).toBe(200);
+
+      const salesTarjetaRes = await request(app)
+        .get('/sales')
+        .set('Authorization', `Bearer ${token}`)
+        .query({ start: today, end: today, payment: 'tarjeta' });
+
+      expect(salesTarjetaRes.statusCode).toBe(200);
+      const row = salesTarjetaRes.body.find(r => r.id === orderId) ?? salesTarjetaRes.body[0];
+      expect(String(row.metodo_pago_resuelto)).toBe('Tarjeta');
+      expect(Number(row.total_operacion)).toBe(80);
+
+      const summaryRes = await request(app)
+        .get('/sales/summary')
+        .set('Authorization', `Bearer ${token}`)
+        .query({ start: today, end: today });
+
+      expect(summaryRes.statusCode).toBe(200);
+      expect(Number(summaryRes.body.tarjeta_total)).toBeGreaterThanOrEqual(80);
+      expect(Number(summaryRes.body.anticipos_efectivo)).toBeGreaterThanOrEqual(10);
+      expect(Number(summaryRes.body.efectivo_total)).toBeGreaterThanOrEqual(10);
     });
   });
 });

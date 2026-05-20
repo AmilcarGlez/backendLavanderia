@@ -255,6 +255,7 @@ async function initPostgresSchema(pgDb) {
     telefono TEXT,
     express BOOLEAN NOT NULL,
     metodo_pago TEXT NOT NULL,
+    liquidacion_monto NUMERIC DEFAULT 0,
     total NUMERIC NOT NULL,
     anticipo NUMERIC DEFAULT 0,
     estado TEXT DEFAULT 'Enproceso',
@@ -265,7 +266,7 @@ async function initPostgresSchema(pgDb) {
     sucursal_id BIGINT REFERENCES sucursales(id)
   )`);
   await q(`CREATE INDEX IF NOT EXISTS orders_sucursal_id_idx ON orders(sucursal_id)`);
-  await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS anticipo NUMERIC DEFAULT 0`);
+  await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS liquidacion_monto NUMERIC DEFAULT 0`);
 
   await q(`CREATE TABLE IF NOT EXISTS order_items (
     id BIGSERIAL PRIMARY KEY,
@@ -443,6 +444,7 @@ function initSqliteSchema(db) {
       metodo_pago TEXT NOT NULL,
       total REAL NOT NULL,
       anticipo REAL DEFAULT 0,
+      liquidacion_monto REAL DEFAULT 0,
       estado TEXT DEFAULT 'Enproceso',
       entregado BOOLEAN DEFAULT 0,
       fecha DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -599,6 +601,7 @@ function initSqliteSchema(db) {
     ensureColumn('services', 'sucursal_id', 'INTEGER');
     ensureColumn('orders', 'sucursal_id', 'INTEGER');
     ensureColumn('orders', 'anticipo', 'REAL DEFAULT 0');
+    ensureColumn('orders', 'liquidacion_monto', 'REAL DEFAULT 0');
     ensureColumn('ironing_jobs', 'sucursal_id', 'INTEGER');
     ensureColumn('ironing_personnel', 'sucursal_id', 'INTEGER');
 
