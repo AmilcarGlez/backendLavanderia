@@ -379,7 +379,7 @@ app.delete('/services/:id', (req, res) => {
 
 // Create an order
 app.post('/orders', (req, res) => {
-  const { cliente, telefono, express, metodo_pago, total, anticipo, items, fecha_entrega, fecha_entrega_tz, ironing } = req.body;
+  const { cliente, telefono, observaciones, express, metodo_pago, total, anticipo, items, fecha_entrega, fecha_entrega_tz, ironing } = req.body;
 
   const isValidIsoDate = (value) => {
     if (typeof value !== 'string') return false;
@@ -418,41 +418,79 @@ app.post('/orders', (req, res) => {
   }
 
   const tz = typeof fecha_entrega_tz === 'string' && fecha_entrega_tz.trim() ? fecha_entrega_tz.trim() : 'America/Mexico_City';
+  const observacionesText = sanitizeText(observaciones, 2000);
+
+  const normalizedItems = Array.isArray(items)
+    ? items.map((item) => {
+        const service_id = Number(item?.service_id);
+        const cantidad = Number(item?.cantidad);
+        const precio = Number(item?.precio);
+        return { service_id, cantidad, precio };
+      })
+    : [];
+
+  const invalidItem = normalizedItems.find((it) => {
+    if (!Number.isFinite(it.service_id) || it.service_id <= 0) return true;
+    if (!Number.isFinite(it.cantidad) || it.cantidad <= 0) return true;
+    if (!Number.isFinite(it.precio) || it.precio < 0) return true;
+    if (it.cantidad > 10000) return true;
+    return false;
+  });
+  if (invalidItem) {
+    res.status(400).json({ error: 'Invalid items payload' });
+    return;
+  }
 
   db.serialize(() => {
     db.run('BEGIN TRANSACTION');
 
+    let finished = false;
+    const rollbackAndRespond = (status, message) => {
+      if (finished) return;
+      finished = true;
+      db.run('ROLLBACK', () => {
+        res.status(status).json({ error: message });
+      });
+    };
+
     db.run(
-      `INSERT INTO orders (cliente, telefono, express, metodo_pago, total, anticipo, fecha_entrega, fecha_entrega_tz, sucursal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [cliente, telefono || '', !!express, metodo_pago, totalNum, anticipoNum, fechaEntregaIso, tz, req.user?.sucursal_id],
+      `INSERT INTO orders (cliente, telefono, observaciones, express, metodo_pago, total, anticipo, fecha_entrega, fecha_entrega_tz, sucursal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [cliente, telefono || '', observacionesText, !!express, metodo_pago, totalNum, anticipoNum, fechaEntregaIso, tz, req.user?.sucursal_id],
       function (err) {
         if (err) {
-          db.run('ROLLBACK');
-          res.status(500).json({ error: err.message });
+          rollbackAndRespond(500, err.message);
           return;
         }
 
         const orderId = this.lastID;
 
-        const stmt = db.prepare('INSERT INTO order_items (order_id, service_id, cantidad, precio_unitario) VALUES (?, ?, ?, ?)');
-        items.forEach(item => {
-          stmt.run([orderId, item.service_id, item.cantidad, item.precio]);
-        });
-        stmt.finalize((err) => {
-          if (err) {
-            db.run('ROLLBACK');
-            res.status(500).json({ error: 'Error inserting order items: ' + err.message });
-            return;
-          }
+        const insertOrderItems = (idx) => {
+          if (finished) return;
+          if (idx >= normalizedItems.length) return afterOrderItemsInserted();
+          const it = normalizedItems[idx];
+          db.run(
+            'INSERT INTO order_items (order_id, service_id, cantidad, precio_unitario) VALUES (?, ?, ?, ?)',
+            [orderId, it.service_id, it.cantidad, it.precio],
+            function (itemErr) {
+              if (itemErr) {
+                rollbackAndRespond(500, 'Error inserting order items: ' + itemErr.message);
+                return;
+              }
+              insertOrderItems(idx + 1);
+            }
+          );
+        };
 
-          const uniqueServiceIds = Array.from(new Set(items.map(i => Number(i.service_id)).filter(n => Number.isFinite(n))));
+        const afterOrderItemsInserted = () => {
+          const uniqueServiceIds = Array.from(new Set(normalizedItems.map(i => Number(i.service_id)).filter(n => Number.isFinite(n))));
           if (uniqueServiceIds.length === 0) {
             db.run('COMMIT', (commitErr) => {
               if (commitErr) {
-                db.run('ROLLBACK');
-                res.status(500).json({ error: commitErr.message });
+                rollbackAndRespond(500, commitErr.message);
                 return;
               }
+              if (finished) return;
+              finished = true;
               res.status(201).json({ message: 'Order created successfully', orderId });
             });
             return;
@@ -461,13 +499,12 @@ app.post('/orders', (req, res) => {
           const placeholders = uniqueServiceIds.map(() => '?').join(',');
           db.all(`SELECT id, categoria FROM services WHERE id IN (${placeholders})`, uniqueServiceIds, (catErr, rows) => {
             if (catErr) {
-              db.run('ROLLBACK');
-              res.status(500).json({ error: catErr.message });
+              rollbackAndRespond(500, catErr.message);
               return;
             }
 
             const categoryById = new Map(rows.map(r => [Number(r.id), r.categoria]));
-            const planchadoQtyFromItems = items.reduce((acc, it) => {
+            const planchadoQtyFromItems = normalizedItems.reduce((acc, it) => {
               const sid = Number(it.service_id);
               const qty = Number(it.cantidad);
               if (!Number.isFinite(sid) || !Number.isFinite(qty)) return acc;
@@ -499,16 +536,16 @@ app.post('/orders', (req, res) => {
                 [orderId, cliente, planchadoQty, fechaEntregaIso, 'En Espera', breakdownJson, req.user?.sucursal_id],
                 (jobErr) => {
                   if (jobErr) {
-                    db.run('ROLLBACK');
-                    res.status(500).json({ error: jobErr.message });
+                    rollbackAndRespond(500, jobErr.message);
                     return;
                   }
                   db.run('COMMIT', (commitErr) => {
                     if (commitErr) {
-                      db.run('ROLLBACK');
-                      res.status(500).json({ error: commitErr.message });
+                      rollbackAndRespond(500, commitErr.message);
                       return;
                     }
+                    if (finished) return;
+                    finished = true;
                     res.status(201).json({ message: 'Order created successfully', orderId });
                   });
                 }
@@ -518,14 +555,17 @@ app.post('/orders', (req, res) => {
 
             db.run('COMMIT', (commitErr) => {
               if (commitErr) {
-                db.run('ROLLBACK');
-                res.status(500).json({ error: commitErr.message });
+                rollbackAndRespond(500, commitErr.message);
                 return;
               }
+              if (finished) return;
+              finished = true;
               res.status(201).json({ message: 'Order created successfully', orderId });
             });
           });
-        });
+        };
+
+        insertOrderItems(0);
       }
     );
   });

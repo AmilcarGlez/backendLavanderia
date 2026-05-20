@@ -253,6 +253,7 @@ async function initPostgresSchema(pgDb) {
     id BIGSERIAL PRIMARY KEY,
     cliente TEXT NOT NULL,
     telefono TEXT,
+    observaciones TEXT,
     express BOOLEAN NOT NULL,
     metodo_pago TEXT NOT NULL,
     liquidacion_monto NUMERIC DEFAULT 0,
@@ -267,15 +268,32 @@ async function initPostgresSchema(pgDb) {
   )`);
   await q(`CREATE INDEX IF NOT EXISTS orders_sucursal_id_idx ON orders(sucursal_id)`);
   await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS liquidacion_monto NUMERIC DEFAULT 0`);
+  await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS observaciones TEXT`);
 
   await q(`CREATE TABLE IF NOT EXISTS order_items (
     id BIGSERIAL PRIMARY KEY,
     order_id BIGINT NOT NULL REFERENCES orders(id),
     service_id BIGINT NOT NULL REFERENCES services(id),
-    cantidad INTEGER NOT NULL,
+    cantidad NUMERIC NOT NULL,
     precio_unitario NUMERIC NOT NULL
   )`);
   await q(`CREATE INDEX IF NOT EXISTS order_items_order_id_idx ON order_items(order_id)`);
+  await q(`DO $$
+  BEGIN
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'order_items'
+        AND column_name = 'cantidad'
+        AND data_type = 'integer'
+    ) THEN
+      ALTER TABLE order_items
+      ALTER COLUMN cantidad TYPE NUMERIC
+      USING cantidad::numeric;
+    END IF;
+  END
+  $$;`);
 
   await q(`CREATE TABLE IF NOT EXISTS ironing_personnel (
     id BIGSERIAL PRIMARY KEY,
@@ -440,6 +458,7 @@ function initSqliteSchema(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       cliente TEXT NOT NULL,
       telefono TEXT,
+      observaciones TEXT,
       express BOOLEAN NOT NULL,
       metodo_pago TEXT NOT NULL,
       total REAL NOT NULL,
@@ -602,6 +621,7 @@ function initSqliteSchema(db) {
     ensureColumn('orders', 'sucursal_id', 'INTEGER');
     ensureColumn('orders', 'anticipo', 'REAL DEFAULT 0');
     ensureColumn('orders', 'liquidacion_monto', 'REAL DEFAULT 0');
+    ensureColumn('orders', 'observaciones', 'TEXT');
     ensureColumn('ironing_jobs', 'sucursal_id', 'INTEGER');
     ensureColumn('ironing_personnel', 'sucursal_id', 'INTEGER');
 
