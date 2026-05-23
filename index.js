@@ -886,6 +886,88 @@ app.put('/orders/:id', (req, res) => {
   );
 });
 
+app.delete('/orders/:id', (req, res) => {
+  const idNum = Number(req.params.id);
+  if (!Number.isFinite(idNum) || idNum <= 0) {
+    return res.status(400).json({ error: 'Invalid order id' });
+  }
+
+  const sid = req.user?.sucursal_id;
+  if (!sid) return res.status(400).json({ error: 'Missing sucursal_id' });
+
+  db.get('SELECT * FROM orders WHERE id = ? AND sucursal_id = ?', [idNum, sid], (err, order) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    db.all('SELECT * FROM order_items WHERE order_id = ?', [idNum], (itemsErr, items) => {
+      if (itemsErr) return res.status(500).json({ error: itemsErr.message });
+
+      db.get('SELECT * FROM ironing_jobs WHERE order_id = ? AND (sucursal_id = ? OR sucursal_id IS NULL)', [idNum, sid], (jobErr, job) => {
+        if (jobErr) return res.status(500).json({ error: jobErr.message });
+
+        const requestIdHeader = req.headers['x-request-id'];
+        const requestId = typeof requestIdHeader === 'string' && requestIdHeader.trim()
+          ? requestIdHeader.trim()
+          : `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        const actorUserId = req.user?.id !== undefined && req.user?.id !== null ? Number(req.user.id) : null;
+        const actorUsername = typeof req.user?.username === 'string' ? req.user.username : null;
+        const actorRole = typeof req.user?.role === 'string' ? req.user.role : null;
+        const ip = String(req.headers['x-forwarded-for'] ?? req.ip ?? '').split(',')[0].trim() || null;
+        const userAgent = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null;
+        const beforeJson = JSON.stringify({ order, items: Array.isArray(items) ? items : [], ironing_job: job ?? null });
+
+        const rollback = (statusCode, message) => {
+          db.run('ROLLBACK', () => res.status(statusCode).json({ error: message }));
+        };
+
+        db.serialize(() => {
+          db.run('BEGIN TRANSACTION');
+
+          db.run('DELETE FROM order_items WHERE order_id = ?', [idNum], (delItemsErr) => {
+            if (delItemsErr) return rollback(500, delItemsErr.message);
+
+            db.run('DELETE FROM ironing_jobs WHERE order_id = ? AND (sucursal_id = ? OR sucursal_id IS NULL)', [idNum, sid], (delJobErr) => {
+              if (delJobErr) return rollback(500, delJobErr.message);
+
+              db.run('DELETE FROM orders WHERE id = ? AND sucursal_id = ?', [idNum, sid], function (delOrderErr) {
+                if (delOrderErr) return rollback(500, delOrderErr.message);
+                if (!this.changes) return rollback(404, 'Order not found');
+
+                db.run(
+                  `INSERT INTO admin_audit_log
+                    (request_id, actor_user_id, actor_username, actor_role, action, table_name, record_pk, ip, user_agent, before_json, after_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  [
+                    requestId,
+                    actorUserId,
+                    actorUsername,
+                    actorRole,
+                    'ORDER_DELETE',
+                    'orders',
+                    String(idNum),
+                    ip,
+                    userAgent,
+                    beforeJson,
+                    null
+                  ],
+                  (auditErr) => {
+                    if (auditErr) return rollback(500, auditErr.message);
+
+                    db.run('COMMIT', (commitErr) => {
+                      if (commitErr) return rollback(500, commitErr.message);
+                      res.json({ success: true });
+                    });
+                  }
+                );
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
 // --- APP SETTINGS ENDPOINTS ---
 
 app.get('/settings/:key', (req, res) => {

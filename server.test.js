@@ -24,6 +24,7 @@ describe('Ironing API Endpoints', () => {
     await new Promise((resolve, reject) => db.run('DELETE FROM ironing_personnel', (e) => (e ? reject(e) : resolve())));
     await new Promise((resolve, reject) => db.run('DELETE FROM daily_ironing_limits', (e) => (e ? reject(e) : resolve())));
     await new Promise((resolve, reject) => db.run('DELETE FROM daily_ironing_audit', (e) => (e ? reject(e) : resolve())));
+    await new Promise((resolve, reject) => db.run('DELETE FROM admin_audit_log', (e) => (e ? reject(e) : resolve())));
     await new Promise((resolve, reject) => db.run('DELETE FROM users_app', (e) => (e ? reject(e) : resolve())));
     await new Promise((resolve, reject) => db.run('DELETE FROM sucursales', (e) => (e ? reject(e) : resolve())));
 
@@ -193,6 +194,113 @@ describe('Ironing API Endpoints', () => {
       expect(detailRes.body.order.id).toBe(id);
       expect(Array.isArray(detailRes.body.items)).toBe(true);
       expect(detailRes.body.items.length).toBeGreaterThan(0);
+    });
+
+    it('should delete an order and all linked records and write audit log', async () => {
+      const servicesRes = await request(app).get('/services').set('Authorization', `Bearer ${token}`);
+      expect(servicesRes.statusCode).toBe(200);
+      const services = servicesRes.body;
+      const anyService = Array.isArray(services) && services.length ? services[0] : null;
+      expect(anyService).toBeTruthy();
+
+      const orderRes = await request(app)
+        .post('/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          cliente: 'Cliente Eliminar',
+          telefono: '4444444444',
+          express: false,
+          metodo_pago: 'Crédito',
+          total: 20,
+          anticipo: 0,
+          fecha_entrega: '2026-04-01',
+          fecha_entrega_tz: 'America/Mexico_City',
+          items: [{ service_id: anyService.id, cantidad: 4, precio: 5 }]
+        });
+
+      expect(orderRes.statusCode).toBe(201);
+      const orderId = orderRes.body.orderId;
+      expect(orderId).toBeTruthy();
+
+      const delRes = await request(app).delete(`/orders/${orderId}`).set('Authorization', `Bearer ${token}`);
+      expect(delRes.statusCode).toBe(200);
+      expect(delRes.body).toHaveProperty('success', true);
+
+      const detailRes = await request(app).get(`/orders/${orderId}`).set('Authorization', `Bearer ${token}`);
+      expect(detailRes.statusCode).toBe(404);
+
+      const jobsRes = await request(app).get('/ironing-jobs').set('Authorization', `Bearer ${token}`);
+      expect(jobsRes.statusCode).toBe(200);
+      expect(Array.isArray(jobsRes.body)).toBe(true);
+      expect(jobsRes.body.some(j => j.order_id === orderId)).toBe(false);
+
+      const itemCount = await new Promise((resolve, reject) => {
+        db.get('SELECT COUNT(*) as c FROM order_items WHERE order_id = ?', [orderId], (e, row) => (e ? reject(e) : resolve(Number(row?.c ?? 0))));
+      });
+      expect(itemCount).toBe(0);
+
+      const auditRow = await new Promise((resolve, reject) => {
+        db.get(
+          "SELECT action, table_name, record_pk FROM admin_audit_log WHERE action = 'ORDER_DELETE' AND table_name = 'orders' AND record_pk = ? ORDER BY id DESC LIMIT 1",
+          [String(orderId)],
+          (e, row) => (e ? reject(e) : resolve(row))
+        );
+      });
+      expect(auditRow).toBeTruthy();
+    });
+
+    it('should reject delete order without auth', async () => {
+      const res = await request(app).delete('/orders/999999');
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('should not allow deleting an order from another sucursal', async () => {
+      const servicesRes = await request(app).get('/services').set('Authorization', `Bearer ${token}`);
+      const services = servicesRes.body;
+      const anyService = Array.isArray(services) && services.length ? services[0] : null;
+      expect(anyService).toBeTruthy();
+
+      const orderRes = await request(app)
+        .post('/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          cliente: 'Cliente Otra Sucursal',
+          telefono: '',
+          express: false,
+          metodo_pago: 'Efectivo',
+          total: 5,
+          fecha_entrega: '2026-04-01',
+          fecha_entrega_tz: 'America/Mexico_City',
+          items: [{ service_id: anyService.id, cantidad: 1, precio: 5 }]
+        });
+      expect(orderRes.statusCode).toBe(201);
+      const orderId = orderRes.body.orderId;
+
+      const sucursal2 = await new Promise((resolve, reject) => {
+        db.run(
+          'INSERT INTO sucursales (nombre, direccion, telefono, email, horario_atencion, encargado_nombre, activa) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          ['Sucursal Test 2', 'Dir', '000', 'test2@example.com', '9-6', 'Encargado', true],
+          function (e) {
+            if (e) return reject(e);
+            resolve(this.lastID);
+          }
+        );
+      });
+      const password2 = 'testpass456';
+      const passwordHash2 = bcrypt.hashSync(password2, 10);
+      await new Promise((resolve, reject) => {
+        db.run(
+          "INSERT INTO users_app (username, password_hash, email, role, sucursal_id, is_active) VALUES (?, ?, ?, 'user', ?, ?)",
+          ['tester2', passwordHash2, 'test2@example.com', sucursal2, true],
+          (e) => (e ? reject(e) : resolve())
+        );
+      });
+      const login2 = await request(app).post('/login').send({ username: 'tester2', password: password2 });
+      expect(login2.statusCode).toBe(200);
+      const token2 = login2.body.token;
+
+      const delRes = await request(app).delete(`/orders/${orderId}`).set('Authorization', `Bearer ${token2}`);
+      expect(delRes.statusCode).toBe(404);
     });
   });
 
