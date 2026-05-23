@@ -35,7 +35,10 @@ app.post('/login', (req, res) => {
     if (!user) return res.status(401).json({ error: 'Credenciales inválidas' });
     if (!bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Credenciales inválidas' });
     const token = jwt.sign({ id: user.id, username: user.username, sucursal_id: user.sucursal_id, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, user: { id: user.id, username: user.username, sucursal_id: user.sucursal_id, role: user.role } });
+    res.json({
+      token,
+      user: { id: user.id, username: user.username, sucursal_id: user.sucursal_id, role: user.role, pin: user.pin ?? null }
+    });
   });
 });
 
@@ -56,6 +59,17 @@ const authMiddleware = (req, res, next) => {
 };
 
 app.use(authMiddleware);
+
+app.get('/users/me', (req, res) => {
+  const uid = req.user?.id;
+  if (!uid) return res.status(400).json({ error: 'Missing user id' });
+  db.get('SELECT id, username, role, sucursal_id, pin, is_active FROM users_app WHERE id = ?', [uid], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!row) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (row.is_active === false || row.is_active === 0) return res.status(403).json({ error: 'Usuario inactivo' });
+    res.json({ id: row.id, username: row.username, role: row.role, sucursal_id: row.sucursal_id, pin: row.pin ?? null });
+  });
+});
 
 
 

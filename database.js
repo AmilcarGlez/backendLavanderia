@@ -233,11 +233,13 @@ async function initPostgresSchema(pgDb) {
     email TEXT,
     role TEXT NOT NULL DEFAULT 'user',
     sucursal_id BIGINT NOT NULL REFERENCES sucursales(id),
+    pin INTEGER,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
   )`);
   await q(`CREATE INDEX IF NOT EXISTS users_app_sucursal_id_idx ON users_app(sucursal_id)`);
+  await q(`ALTER TABLE users_app ADD COLUMN IF NOT EXISTS pin INTEGER`);
 
   await q(`CREATE TABLE IF NOT EXISTS services (
     id BIGSERIAL PRIMARY KEY,
@@ -536,6 +538,7 @@ function initSqliteSchema(db) {
       is_active BOOLEAN DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      pin INTEGER,
       FOREIGN KEY(sucursal_id) REFERENCES sucursales(id)
     )`);
 
@@ -637,6 +640,7 @@ function initSqliteSchema(db) {
 
     ensureColumn('users_app', 'is_active', 'BOOLEAN DEFAULT 1');
     ensureColumn('users_app', 'updated_at', 'DATETIME');
+    ensureColumn('users_app', 'pin', 'INTEGER');
 
     ensureColumn('app_settings', 'sucursal_id', 'INTEGER');
     ensureColumn('daily_ironing_limits', 'sucursal_id', 'INTEGER');
