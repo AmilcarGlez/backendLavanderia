@@ -1238,8 +1238,9 @@ app.put('/ironing-personnel/:id', (req, res) => {
 
 app.get('/ironing-jobs', (req, res) => {
   const query = `
-    SELECT ij.*, ip.nombre as asignado_nombre, ip.apellido as asignado_apellido 
-    FROM ironing_jobs ij 
+    SELECT ij.*, o.observaciones as observaciones, ip.nombre as asignado_nombre, ip.apellido as asignado_apellido 
+    FROM ironing_jobs ij
+    LEFT JOIN orders o ON o.id = ij.order_id
     LEFT JOIN ironing_personnel ip ON ij.asignado_id = ip.id
     WHERE ij.sucursal_id = ? ORDER BY ij.id DESC
   `;

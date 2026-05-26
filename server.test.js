@@ -116,6 +116,7 @@ describe('Ironing API Endpoints', () => {
         .send({
           cliente: 'Cliente Docena',
           telefono: '1111111111',
+          observaciones: 'Observación de prueba',
           express: false,
           metodo_pago: 'Efectivo',
           total: 50,
@@ -158,6 +159,7 @@ describe('Ironing API Endpoints', () => {
       const created = jobsRes.body.find(j => j.order_id === orderId) ?? jobsRes.body[0];
       expect(created.cantidad).toBe(12);
       expect(created.breakdown_json).toBeTruthy();
+      expect(String(created.observaciones ?? '')).toBe('Observación de prueba');
       const parsed = JSON.parse(created.breakdown_json);
       expect(parsed.pieces_total).toBe(12);
       expect(Array.isArray(parsed.breakdown)).toBe(true);
