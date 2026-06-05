@@ -813,7 +813,7 @@ app.get('/orders/:id', (req, res) => {
 // Update an order (estado, entregado, metodo_pago)
 app.put('/orders/:id', (req, res) => {
   const { id } = req.params;
-  const { estado, entregado, metodo_pago, fecha_entrega, fecha_entrega_tz, liquidacion_monto } = req.body;
+  const { estado, entregado, metodo_pago, fecha_entrega, fecha_entrega_tz, liquidacion_monto, fecha_cobro, liquidacion_fecha, liquidado, fecha } = req.body;
 
   const isValidIsoDate = (value) => {
     if (typeof value !== 'string') return false;
@@ -828,9 +828,35 @@ app.put('/orders/:id', (req, res) => {
     return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
   };
 
+  const isValidIsoDateTime = (value) => {
+    if (typeof value !== 'string') return false;
+    const v = value.trim();
+    if (!v) return false;
+    const dt = new Date(v);
+    return Number.isFinite(dt.getTime());
+  };
+
   const hasFechaEntrega = fecha_entrega !== undefined && fecha_entrega !== null && String(fecha_entrega).trim() !== '';
   if (hasFechaEntrega && !isValidIsoDate(String(fecha_entrega).trim())) {
     res.status(400).json({ error: 'Invalid fecha_entrega. Expected YYYY-MM-DD' });
+    return;
+  }
+
+  const hasFechaCobro = fecha_cobro !== undefined && fecha_cobro !== null && String(fecha_cobro).trim() !== '';
+  if (hasFechaCobro && !isValidIsoDate(String(fecha_cobro).trim())) {
+    res.status(400).json({ error: 'Invalid fecha_cobro. Expected YYYY-MM-DD' });
+    return;
+  }
+
+  const hasLiquidacionFecha = liquidacion_fecha !== undefined && liquidacion_fecha !== null && String(liquidacion_fecha).trim() !== '';
+  if (hasLiquidacionFecha && !isValidIsoDateTime(String(liquidacion_fecha).trim())) {
+    res.status(400).json({ error: 'Invalid liquidacion_fecha. Expected ISO 8601 date-time' });
+    return;
+  }
+
+  const hasFecha = fecha !== undefined && fecha !== null && String(fecha).trim() !== '';
+  if (hasFecha && !isValidIsoDateTime(String(fecha).trim())) {
+    res.status(400).json({ error: 'Invalid fecha. Expected ISO 8601 date-time' });
     return;
   }
 
@@ -848,6 +874,10 @@ app.put('/orders/:id', (req, res) => {
       entregado = COALESCE(?, entregado), 
       metodo_pago = COALESCE(?, metodo_pago),
       liquidacion_monto = COALESCE(?, liquidacion_monto),
+      fecha_cobro = COALESCE(?, fecha_cobro),
+      liquidacion_fecha = COALESCE(?, liquidacion_fecha),
+      liquidado = COALESCE(?, liquidado),
+      fecha = COALESCE(?, fecha),
       fecha_entrega = COALESCE(?, fecha_entrega),
       fecha_entrega_tz = COALESCE(?, fecha_entrega_tz)
      WHERE id = ? AND (sucursal_id = ? OR sucursal_id IS NULL)`,
@@ -856,12 +886,22 @@ app.put('/orders/:id', (req, res) => {
       entregado !== undefined ? !!entregado : null,
       metodo_pago,
       hasLiquidacionMonto ? liquidacionMontoNum : null,
+      hasFechaCobro ? String(fecha_cobro).trim() : null,
+      hasLiquidacionFecha ? String(liquidacion_fecha).trim() : null,
+      liquidado !== undefined ? !!liquidado : null,
+      hasFecha ? String(fecha).trim() : null,
       hasFechaEntrega ? String(fecha_entrega).trim() : null,
       typeof fecha_entrega_tz === 'string' && fecha_entrega_tz.trim() ? fecha_entrega_tz.trim() : null,
       id, req.user?.sucursal_id
     ],
     function(err) {
       if (err) {
+        console.error('[orders:update] db error', {
+          id,
+          sucursal_id: req.user?.sucursal_id,
+          message: err.message,
+          body: req.body
+        });
         res.status(500).json({ error: err.message });
         return;
       }
