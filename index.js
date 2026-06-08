@@ -636,12 +636,15 @@ app.get('/sales', (req, res) => {
       : `DATE(orders.fecha)`;
   const dateFromCobro =
     db.dialect === 'postgres'
-      ? `LEFT(orders.fecha_cobro, 10)`
+      ? `TO_CHAR(DATE(orders.fecha_cobro AT TIME ZONE 'America/Mexico_City'), 'YYYY-MM-DD')`
       : `SUBSTR(orders.fecha_cobro, 1, 10)`;
+  const hasCobroValue =
+    db.dialect === 'postgres'
+      ? `orders.fecha_cobro IS NOT NULL`
+      : `orders.fecha_cobro IS NOT NULL AND TRIM(orders.fecha_cobro) <> ''`;
   const dateExpr = `CASE
     WHEN orders.metodo_pago LIKE 'Crédito (Pagado:%'
-      AND orders.fecha_cobro IS NOT NULL
-      AND TRIM(orders.fecha_cobro) <> ''
+      AND ${hasCobroValue}
     THEN ${dateFromCobro}
     ELSE ${dateFromFecha}
   END`;
@@ -725,12 +728,15 @@ app.get('/sales/summary', (req, res) => {
       : `DATE(orders.fecha)`;
   const dateFromCobro =
     db.dialect === 'postgres'
-      ? `LEFT(orders.fecha_cobro, 10)`
+      ? `TO_CHAR(DATE(orders.fecha_cobro AT TIME ZONE 'America/Mexico_City'), 'YYYY-MM-DD')`
       : `SUBSTR(orders.fecha_cobro, 1, 10)`;
+  const hasCobroValue =
+    db.dialect === 'postgres'
+      ? `orders.fecha_cobro IS NOT NULL`
+      : `orders.fecha_cobro IS NOT NULL AND TRIM(orders.fecha_cobro) <> ''`;
   const effectiveDate = `CASE
     WHEN orders.metodo_pago LIKE 'Crédito (Pagado:%'
-      AND orders.fecha_cobro IS NOT NULL
-      AND TRIM(orders.fecha_cobro) <> ''
+      AND ${hasCobroValue}
     THEN ${dateFromCobro}
     ELSE ${dateFromFecha}
   END`;
