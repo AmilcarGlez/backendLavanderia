@@ -630,10 +630,21 @@ app.get('/sales', (req, res) => {
     return res.status(400).json({ error: 'Invalid start/end. Expected YYYY-MM-DD' });
   }
 
-  const dateExpr =
+  const dateFromFecha =
     db.dialect === 'postgres'
-      ? `DATE(orders.fecha AT TIME ZONE 'America/Mexico_City')`
+      ? `TO_CHAR(DATE(orders.fecha AT TIME ZONE 'America/Mexico_City'), 'YYYY-MM-DD')`
       : `DATE(orders.fecha)`;
+  const dateFromCobro =
+    db.dialect === 'postgres'
+      ? `LEFT(orders.fecha_cobro, 10)`
+      : `SUBSTR(orders.fecha_cobro, 1, 10)`;
+  const dateExpr = `CASE
+    WHEN orders.metodo_pago LIKE 'Crédito (Pagado:%'
+      AND orders.fecha_cobro IS NOT NULL
+      AND TRIM(orders.fecha_cobro) <> ''
+    THEN ${dateFromCobro}
+    ELSE ${dateFromFecha}
+  END`;
 
   const where = [`orders.sucursal_id = ?`, `${dateExpr} BETWEEN ? AND ?`];
   const params = [req.user?.sucursal_id, start, end];
@@ -646,7 +657,8 @@ app.get('/sales', (req, res) => {
     COALESCE(orders.total, 0) as total,
     COALESCE(orders.anticipo, 0) as anticipo,
     COALESCE(orders.liquidacion_monto, 0) as liquidacion_monto,
-    orders.fecha
+    orders.fecha,
+    orders.fecha_cobro
   FROM orders
   WHERE ${where.join(' AND ')}
   ORDER BY orders.fecha DESC, orders.id DESC`;
@@ -665,6 +677,9 @@ app.get('/sales', (req, res) => {
 
         const isCreditoPagadoEfectivo = metodoPagoStr.startsWith('Crédito (Pagado: Efectivo)');
         const isCreditoPagadoTarjeta = metodoPagoStr.startsWith('Crédito (Pagado: Tarjeta)');
+        const resolvedFecha = (isCreditoPagadoEfectivo || isCreditoPagadoTarjeta) && r?.fecha_cobro
+          ? r.fecha_cobro
+          : r?.fecha;
 
         const total_operacion =
           bucket === 'Crédito'
@@ -686,7 +701,7 @@ app.get('/sales', (req, res) => {
           liquidacion_monto,
           total_operacion,
           efectivo_recibido,
-          fecha: r?.fecha
+          fecha: resolvedFecha
         };
       })
       .filter((r) => (payment ? r.metodo_pago_resuelto === payment : true));
@@ -704,53 +719,87 @@ app.get('/sales/summary', (req, res) => {
     return res.status(400).json({ error: 'Invalid start/end. Expected YYYY-MM-DD' });
   }
 
-  const dateExpr =
+  const dateFromFecha =
     db.dialect === 'postgres'
-      ? `DATE(orders.fecha AT TIME ZONE 'America/Mexico_City')`
+      ? `TO_CHAR(DATE(orders.fecha AT TIME ZONE 'America/Mexico_City'), 'YYYY-MM-DD')`
       : `DATE(orders.fecha)`;
+  const dateFromCobro =
+    db.dialect === 'postgres'
+      ? `LEFT(orders.fecha_cobro, 10)`
+      : `SUBSTR(orders.fecha_cobro, 1, 10)`;
+  const effectiveDate = `CASE
+    WHEN orders.metodo_pago LIKE 'Crédito (Pagado:%'
+      AND orders.fecha_cobro IS NOT NULL
+      AND TRIM(orders.fecha_cobro) <> ''
+    THEN ${dateFromCobro}
+    ELSE ${dateFromFecha}
+  END`;
 
-  const sql = `SELECT
-    COUNT(*) as total_transacciones,
-    SUM(
+  const sql = `WITH tx AS (
+    SELECT
+      1 as trans,
+      ${effectiveDate} as day,
       CASE
         WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
         WHEN orders.metodo_pago LIKE 'Tarjeta%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
-        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
-        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Tarjeta)%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
-        WHEN orders.metodo_pago LIKE 'Crédito%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0)
+        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Tarjeta)%' THEN COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0)
+        WHEN orders.metodo_pago LIKE 'Crédito%' THEN COALESCE(orders.total,0)
         ELSE 0
-      END
-    ) as ingresos_totales,
-    SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.anticipo,0) + COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0))
-      WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
-      WHEN orders.metodo_pago LIKE 'Crédito%' THEN COALESCE(orders.anticipo,0)
-      ELSE 0
-    END) as efectivo_caja,
-    SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN (COALESCE(orders.anticipo,0) + COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0))
-      WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
-      WHEN orders.metodo_pago LIKE 'Crédito%' THEN COALESCE(orders.anticipo,0)
-      ELSE 0
-    END) as efectivo_total,
-    SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Tarjeta)%' THEN COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0)
-      WHEN orders.metodo_pago LIKE 'Tarjeta%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
-      ELSE 0
-    END) as tarjeta_total,
-    SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito%' AND orders.metodo_pago NOT LIKE 'Crédito (Pagado:%' THEN COALESCE(orders.total,0)
-      ELSE 0
-    END) as credito_total,
-    SUM(CASE
-      WHEN orders.metodo_pago LIKE 'Crédito%' THEN COALESCE(orders.anticipo,0)
-      ELSE 0
-    END) as anticipos_efectivo
-  FROM orders
-  WHERE orders.sucursal_id = ?
-    AND ${dateExpr} BETWEEN ? AND ?`;
+      END as ingresos,
+      CASE
+        WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0)
+        ELSE 0
+      END as efectivo_total,
+      CASE
+        WHEN orders.metodo_pago LIKE 'Tarjeta%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Tarjeta)%' THEN COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0)
+        ELSE 0
+      END as tarjeta_total,
+      CASE
+        WHEN orders.metodo_pago LIKE 'Crédito%'
+          AND orders.metodo_pago NOT LIKE 'Crédito (Pagado:%'
+        THEN COALESCE(orders.total,0)
+        ELSE 0
+      END as credito_total,
+      0 as anticipos_efectivo,
+      CASE
+        WHEN orders.metodo_pago LIKE 'Efectivo%' THEN (COALESCE(orders.total,0) + COALESCE(orders.anticipo,0))
+        WHEN orders.metodo_pago LIKE 'Crédito (Pagado: Efectivo)%' THEN COALESCE(NULLIF(orders.liquidacion_monto,0), COALESCE(orders.total,0), 0)
+        ELSE 0
+      END as efectivo_caja
+    FROM orders
+    WHERE orders.sucursal_id = ?
 
-  db.get(sql, [req.user?.sucursal_id, start, end], (err, row) => {
+    UNION ALL
+
+    SELECT
+      0 as trans,
+      ${dateFromFecha} as day,
+      COALESCE(orders.anticipo,0) as ingresos,
+      COALESCE(orders.anticipo,0) as efectivo_total,
+      0 as tarjeta_total,
+      0 as credito_total,
+      COALESCE(orders.anticipo,0) as anticipos_efectivo,
+      COALESCE(orders.anticipo,0) as efectivo_caja
+    FROM orders
+    WHERE orders.sucursal_id = ?
+      AND orders.metodo_pago LIKE 'Crédito%'
+      AND COALESCE(orders.anticipo,0) > 0
+  )
+  SELECT
+    SUM(trans) as total_transacciones,
+    SUM(ingresos) as ingresos_totales,
+    SUM(efectivo_caja) as efectivo_caja,
+    SUM(efectivo_total) as efectivo_total,
+    SUM(tarjeta_total) as tarjeta_total,
+    SUM(credito_total) as credito_total,
+    SUM(anticipos_efectivo) as anticipos_efectivo
+  FROM tx
+  WHERE day BETWEEN ? AND ?`;
+
+  db.get(sql, [req.user?.sucursal_id, req.user?.sucursal_id, start, end], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
     const r = row || {};
     res.json({
@@ -843,8 +892,8 @@ app.put('/orders/:id', (req, res) => {
   }
 
   const hasFechaCobro = fecha_cobro !== undefined && fecha_cobro !== null && String(fecha_cobro).trim() !== '';
-  if (hasFechaCobro && !isValidIsoDate(String(fecha_cobro).trim())) {
-    res.status(400).json({ error: 'Invalid fecha_cobro. Expected YYYY-MM-DD' });
+  if (hasFechaCobro && !isValidIsoDate(String(fecha_cobro).trim()) && !isValidIsoDateTime(String(fecha_cobro).trim())) {
+    res.status(400).json({ error: 'Invalid fecha_cobro. Expected YYYY-MM-DD or ISO 8601 date-time' });
     return;
   }
 
